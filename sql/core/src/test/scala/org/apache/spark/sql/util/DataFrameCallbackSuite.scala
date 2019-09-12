@@ -22,7 +22,7 @@ import scala.collection.mutable.ArrayBuffer
 import org.apache.spark._
 import org.apache.spark.sql.{functions, AnalysisException, QueryTest}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
-import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, InsertIntoTable, LogicalPlan, Project}
+import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, InsertIntoStatement, LogicalPlan, Project}
 import org.apache.spark.sql.execution.{QueryExecution, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.datasources.{CreateTable, InsertIntoHadoopFsRelationCommand}
 import org.apache.spark.sql.execution.datasources.json.JsonFileFormat
@@ -189,8 +189,8 @@ class DataFrameCallbackSuite extends QueryTest with SharedSQLContext {
       spark.range(10).write.insertInto("tab")
       assert(commands.length == 3)
       assert(commands(2)._1 == "insertInto")
-      assert(commands(2)._2.isInstanceOf[InsertIntoTable])
-      assert(commands(2)._2.asInstanceOf[InsertIntoTable].table
+      assert(commands(2)._2.isInstanceOf[InsertIntoStatement])
+      assert(commands(2)._2.asInstanceOf[InsertIntoStatement].table
         .asInstanceOf[UnresolvedRelation].multipartIdentifier == Seq("tab"))
     }
     // exiting withTable adds commands(3) via onSuccess (drops tab)

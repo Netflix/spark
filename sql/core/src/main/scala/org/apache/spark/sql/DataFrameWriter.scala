@@ -25,7 +25,7 @@ import org.apache.spark.annotation.InterfaceStability
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.catalog._
-import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoTable, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoStatement, LogicalPlan}
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.{CreateTable, DataSource, DataSourceUtils, LogicalRelation}
@@ -303,9 +303,9 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
     }
 
     runCommand(df.sparkSession, "insertInto") {
-      InsertIntoTable(
+      InsertIntoStatement(
         table = UnresolvedRelation(tableIdent),
-        partition = Map.empty[String, Option[String]],
+        partitionSpec = Map.empty[String, Option[String]],
         query = df.logicalPlan,
         overwrite = mode == SaveMode.Overwrite,
         ifPartitionNotExists = false)

@@ -26,8 +26,7 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.planning._
-import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoDir, InsertIntoTable, LogicalPlan,
-    ScriptTransformation}
+import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoDir, InsertIntoStatement, LogicalPlan, ScriptTransformation}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.command.{CreateTableCommand, DDLUtils}
@@ -146,7 +145,7 @@ class DetermineTableStats(session: SparkSession) extends Rule[LogicalPlan] {
  */
 object HiveAnalysis extends Rule[LogicalPlan] {
   override def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperators {
-    case InsertIntoTable(r: HiveTableRelation, partSpec, query, overwrite, ifPartitionNotExists)
+    case InsertIntoStatement(r: HiveTableRelation, partSpec, query, overwrite, ifPartitionNotExists)
         if DDLUtils.isHiveTable(r.tableMeta) =>
       InsertIntoHiveTable(r.tableMeta, partSpec, query, overwrite,
         ifPartitionNotExists, query.output.map(_.name))
@@ -227,11 +226,12 @@ case class RelationConversions(
   override def apply(plan: LogicalPlan): LogicalPlan = {
     plan resolveOperators {
       // Write path
-      case InsertIntoTable(r: HiveTableRelation, partition, query, overwrite, ifPartitionNotExists)
+      case InsertIntoStatement(
+           r: HiveTableRelation, partition, query, overwrite, ifPartitionNotExists)
         // Inserting into partitioned table is not supported in Parquet/Orc data source (yet).
           if query.resolved && DDLUtils.isHiveTable(r.tableMeta) &&
             !r.isPartitioned && isConvertible(r) =>
-        InsertIntoTable(convert(r), partition, query, overwrite, ifPartitionNotExists)
+        InsertIntoStatement(convert(r), partition, query, overwrite, ifPartitionNotExists)
 
       // Read path
       case relation: HiveTableRelation

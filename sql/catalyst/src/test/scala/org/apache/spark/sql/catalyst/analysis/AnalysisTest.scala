@@ -22,6 +22,7 @@ import java.util.Locale
 
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.catalog.{CatalogDatabase, InMemoryCatalog, SessionCatalog}
+import org.apache.spark.sql.catalyst.parser.ParseException
 import org.apache.spark.sql.catalyst.plans.PlanTest
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.internal.SQLConf
@@ -104,6 +105,14 @@ trait AnalysisTest extends PlanTest {
            |
            |  ${e.getMessage}
          """.stripMargin)
+    }
+  }
+
+  protected def interceptParseException(
+      parser: String => Any)(sqlCommand: String, messages: String*): Unit = {
+    val e = intercept[ParseException](parser(sqlCommand))
+    messages.foreach { message =>
+      assert(e.message.contains(message))
     }
   }
 }
