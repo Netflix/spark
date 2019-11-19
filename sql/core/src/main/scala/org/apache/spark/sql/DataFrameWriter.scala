@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql
 
-import java.util.{Locale, Properties, UUID}
+import java.util.{Locale, Properties}
 
 import scala.collection.JavaConverters._
 
@@ -25,14 +25,12 @@ import org.apache.spark.annotation.InterfaceStability
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.catalog._
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, InsertIntoTable, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoTable, LogicalPlan}
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.{CreateTable, DataSource, DataSourceUtils, LogicalRelation}
-import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2Utils, WriteToDataSourceV2}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.BaseRelation
-import org.apache.spark.sql.sources.v2._
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -242,34 +240,7 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
     assertNotBucketed("save")
 
-    val cls = DataSource.lookupDataSource(source, df.sparkSession.sessionState.conf)
-    if (classOf[DataSourceV2].isAssignableFrom(cls)) {
-      val source = cls.newInstance().asInstanceOf[DataSourceV2]
-      source match {
-        case ws: WriteSupport =>
-          val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
-            source,
-            df.sparkSession.sessionState.conf)
-          val options = sessionOptions ++ extraOptions
-
-          val writer = ws.createWriter(
-            UUID.randomUUID.toString, df.logicalPlan.output.toStructType, mode,
-            new DataSourceOptions(options.asJava))
-
-          if (writer.isPresent) {
-            runCommand(df.sparkSession, "save") {
-              WriteToDataSourceV2(writer.get, df.logicalPlan)
-            }
-          }
-
-        // Streaming also uses the data source V2 API. So it may be that the data source implements
-        // v2, but has no v2 implementation for batch writes. In that case, we fall back to saving
-        // as though it's a V1 source.
-        case _ => saveToV1Source()
-      }
-    } else {
-      saveToV1Source()
-    }
+    saveToV1Source()
   }
 
   private def saveToV1Source(): Unit = {

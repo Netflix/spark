@@ -28,7 +28,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{EventTimeWatermark, LogicalPlan}
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.QueryExecution
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2ScanExec
+import org.apache.spark.sql.execution.datasources.v2.StreamingDataSourceV2ScanExec
 import org.apache.spark.sql.sources.v2.reader.streaming.MicroBatchReader
 import org.apache.spark.sql.streaming._
 import org.apache.spark.sql.streaming.StreamingQueryListener.QueryProgressEvent
@@ -275,10 +275,10 @@ trait ProgressReporter extends Logging {
       // 3. Multiple DataSourceV2ScanExec instance may refer to the same source (can happen with
       //    self-unions or self-joins). Add up the number of rows for each unique source.
       val uniqueStreamingExecLeavesMap =
-        new IdentityHashMap[DataSourceV2ScanExec, DataSourceV2ScanExec]()
+        new IdentityHashMap[StreamingDataSourceV2ScanExec, StreamingDataSourceV2ScanExec]()
 
       lastExecution.executedPlan.collectLeaves().foreach {
-        case s: DataSourceV2ScanExec if s.reader.isInstanceOf[BaseStreamingSource] =>
+        case s: StreamingDataSourceV2ScanExec if s.reader.isInstanceOf[BaseStreamingSource] =>
           uniqueStreamingExecLeavesMap.put(s, s)
         case _ =>
       }

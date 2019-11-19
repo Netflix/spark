@@ -21,14 +21,10 @@ import java.util.List;
 
 import org.apache.spark.annotation.InterfaceStability;
 import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.sources.v2.DataSourceOptions;
-import org.apache.spark.sql.sources.v2.ReadSupport;
 import org.apache.spark.sql.types.StructType;
 
 /**
- * A data source reader that is returned by
- * {@link ReadSupport#createReader(DataSourceOptions)} or
- * {@link ReadSupport#createReader(StructType, DataSourceOptions)}.
+ * A data source reader that is returned by ContinuousReadSupport or MicroBatchReadSupport.
  * It can mix in various query optimization interfaces to speed up the data scan. The actual scan
  * logic is delegated to {@link InputPartition}s, which are returned by
  * {@link #planInputPartitions()}.

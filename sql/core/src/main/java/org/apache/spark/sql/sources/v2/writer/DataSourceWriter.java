@@ -18,17 +18,14 @@
 package org.apache.spark.sql.sources.v2.writer;
 
 import org.apache.spark.annotation.InterfaceStability;
-import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.sources.v2.DataSourceOptions;
 import org.apache.spark.sql.sources.v2.StreamWriteSupport;
-import org.apache.spark.sql.sources.v2.WriteSupport;
 import org.apache.spark.sql.streaming.OutputMode;
 import org.apache.spark.sql.types.StructType;
 
 /**
  * A data source writer that is returned by
- * {@link WriteSupport#createWriter(String, StructType, SaveMode, DataSourceOptions)}/
  * {@link StreamWriteSupport#createStreamWriter(
  * String, StructType, OutputMode, DataSourceOptions)}.
  * It can mix in various writing optimization interfaces to speed up the data saving. The actual

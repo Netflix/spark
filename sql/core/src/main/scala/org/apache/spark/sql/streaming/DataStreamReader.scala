@@ -26,7 +26,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{AnalysisException, DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.DataSource
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Utils
 import org.apache.spark.sql.execution.streaming.{StreamingRelation, StreamingRelationV2}
 import org.apache.spark.sql.sources.StreamSourceProvider
 import org.apache.spark.sql.sources.v2.{ContinuousReadSupport, DataSourceOptions, MicroBatchReadSupport}
@@ -158,7 +157,6 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
         "read files of Hive data source directly.")
     }
 
-    val ds = DataSource.lookupDataSource(source, sparkSession.sqlContext.conf).newInstance()
     // We need to generate the V1 data source so we can pass it to the V2 relation as a shim.
     // We can't be sure at this point whether we'll actually want to use V2, since we don't know the
     // writer or whether the query is continuous.
@@ -167,53 +165,8 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
       userSpecifiedSchema = userSpecifiedSchema,
       className = source,
       options = extraOptions.toMap)
-    val v1Relation = ds match {
-      case _: StreamSourceProvider => Some(StreamingRelation(v1DataSource))
-      case _ => None
-    }
-    ds match {
-      case s: MicroBatchReadSupport =>
-        val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
-          ds = s, conf = sparkSession.sessionState.conf)
-        val options = sessionOptions ++ extraOptions
-        val dataSourceOptions = new DataSourceOptions(options.asJava)
-        var tempReader: MicroBatchReader = null
-        val schema = try {
-          tempReader = s.createMicroBatchReader(
-            Optional.ofNullable(userSpecifiedSchema.orNull),
-            Utils.createTempDir(namePrefix = s"temporaryReader").getCanonicalPath,
-            dataSourceOptions)
-          tempReader.readSchema()
-        } finally {
-          // Stop tempReader to avoid side-effect thing
-          if (tempReader != null) {
-            tempReader.stop()
-            tempReader = null
-          }
-        }
-        Dataset.ofRows(
-          sparkSession,
-          StreamingRelationV2(
-            s, source, options,
-            schema.toAttributes, v1Relation)(sparkSession))
-      case s: ContinuousReadSupport =>
-        val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
-          ds = s, conf = sparkSession.sessionState.conf)
-        val options = sessionOptions ++ extraOptions
-        val dataSourceOptions = new DataSourceOptions(options.asJava)
-        val tempReader = s.createContinuousReader(
-          Optional.ofNullable(userSpecifiedSchema.orNull),
-          Utils.createTempDir(namePrefix = s"temporaryReader").getCanonicalPath,
-          dataSourceOptions)
-        Dataset.ofRows(
-          sparkSession,
-          StreamingRelationV2(
-            s, source, options,
-            tempReader.readSchema().toAttributes, v1Relation)(sparkSession))
-      case _ =>
-        // Code path for data source v1.
-        Dataset.ofRows(sparkSession, StreamingRelation(v1DataSource))
-    }
+
+    Dataset.ofRows(sparkSession, StreamingRelation(v1DataSource))
   }
 
   /**

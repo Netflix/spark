@@ -34,19 +34,19 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 /**
  * Physical plan node for scanning data from a data source.
  */
-case class DataSourceV2ScanExec(
+case class StreamingDataSourceV2ScanExec(
     output: Seq[AttributeReference],
     @transient source: DataSourceV2,
     @transient options: Map[String, String],
     @transient pushedFilters: Seq[Expression],
     @transient reader: DataSourceReader)
-  extends LeafExecNode with DataSourceV2StringFormat with ColumnarBatchScan {
+  extends LeafExecNode with StreamingDataSourceV2StringFormat with ColumnarBatchScan {
 
   override def simpleString: String = "ScanV2 " + metadataString
 
   // TODO: unify the equal/hashCode implementation for all data source v2 query plans.
   override def equals(other: Any): Boolean = other match {
-    case other: DataSourceV2ScanExec =>
+    case other: StreamingDataSourceV2ScanExec =>
       output == other.output && reader.getClass == other.reader.getClass && options == other.options
     case _ => false
   }
@@ -64,10 +64,6 @@ case class DataSourceV2ScanExec(
 
     case r if !r.isInstanceOf[SupportsScanColumnarBatch] && partitions.size == 1 =>
       SinglePartition
-
-    case s: SupportsReportPartitioning =>
-      new DataSourcePartitioning(
-        s.outputPartitioning(), AttributeMap(output.map(a => a -> a.name)))
 
     case _ => super.outputPartitioning
   }

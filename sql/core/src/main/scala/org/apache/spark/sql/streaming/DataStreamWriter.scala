@@ -18,6 +18,7 @@
 package org.apache.spark.sql.streaming
 
 import java.util.Locale
+import java.util.regex.Pattern
 
 import scala.collection.JavaConverters._
 
@@ -27,11 +28,11 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.streaming.InternalOutputModes
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.DataSource
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Utils
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.execution.streaming.continuous.ContinuousTrigger
 import org.apache.spark.sql.execution.streaming.sources._
-import org.apache.spark.sql.sources.v2.StreamWriteSupport
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.sources.v2.{DataSourceV2, SessionConfigSupport, StreamWriteSupport}
 
 /**
  * Interface used to write a streaming `Dataset` to external storage systems (e.g. file systems,
@@ -309,7 +310,7 @@ final class DataStreamWriter[T] private[sql](ds: Dataset[T]) {
       var options = extraOptions.toMap
       val sink = ds.newInstance() match {
         case w: StreamWriteSupport if !disabledSources.contains(w.getClass.getCanonicalName) =>
-          val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
+          val sessionOptions = extractSessionConfigs(
             w, df.sparkSession.sessionState.conf)
           options = sessionOptions ++ extraOptions
           w
@@ -332,6 +333,27 @@ final class DataStreamWriter[T] private[sql](ds: Dataset[T]) {
         useTempCheckpointLocation = source == "console",
         recoverFromCheckpointLocation = true,
         trigger = trigger)
+    }
+  }
+
+  private def extractSessionConfigs(ds: DataSourceV2, conf: SQLConf): Map[String, String] = {
+    ds match {
+      case cs: SessionConfigSupport =>
+        val keyPrefix = cs.keyPrefix()
+        require(keyPrefix != null, "The data source config key prefix can't be null.")
+
+        val pattern = Pattern.compile(s"^spark\\.datasource\\.$keyPrefix\\.(.+)")
+
+        conf.getAllConfs.flatMap { case (key, value) =>
+          val m = pattern.matcher(key)
+          if (m.matches() && m.groupCount() > 0) {
+            Seq((m.group(1), value))
+          } else {
+            Seq.empty
+          }
+        }
+
+      case _ => Map.empty
     }
   }
 

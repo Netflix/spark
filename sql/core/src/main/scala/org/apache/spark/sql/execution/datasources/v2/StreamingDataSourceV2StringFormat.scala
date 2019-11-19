@@ -28,7 +28,7 @@ import org.apache.spark.util.Utils
  * A trait that can be used by data source v2 related query plans(both logical and physical), to
  * provide a string format of the data source information for explain.
  */
-trait DataSourceV2StringFormat {
+trait StreamingDataSourceV2StringFormat {
 
   /**
    * The instance of this data source implementation. Note that we only consider its class in

@@ -21,7 +21,6 @@ import java.util.{Locale, Properties}
 
 import scala.collection.JavaConverters._
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.univocity.parsers.csv.CsvParser
 
 import org.apache.spark.Partition
@@ -35,9 +34,6 @@ import org.apache.spark.sql.execution.datasources.{DataSource, FailureSafeParser
 import org.apache.spark.sql.execution.datasources.csv._
 import org.apache.spark.sql.execution.datasources.jdbc._
 import org.apache.spark.sql.execution.datasources.json.TextInputJsonDataSource
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Utils
-import org.apache.spark.sql.sources.v2.{DataSourceOptions, DataSourceV2, ReadSupport}
 import org.apache.spark.sql.types.{StringType, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -175,7 +171,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
    */
   def load(path: String): DataFrame = {
     // force invocation of `load(...varargs...)`
-    option(DataSourceOptions.PATH_KEY, path).load(Seq.empty: _*)
+    option("path", path).load(Seq.empty: _*)
   }
 
   /**
@@ -191,25 +187,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
         "read files of Hive data source directly.")
     }
 
-    val cls = DataSource.lookupDataSource(source, sparkSession.sessionState.conf)
-    if (classOf[DataSourceV2].isAssignableFrom(cls)) {
-      val ds = cls.newInstance().asInstanceOf[DataSourceV2]
-      if (ds.isInstanceOf[ReadSupport]) {
-        val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
-          ds = ds, conf = sparkSession.sessionState.conf)
-        val pathsOption = {
-          val objectMapper = new ObjectMapper()
-          DataSourceOptions.PATHS_KEY -> objectMapper.writeValueAsString(paths.toArray)
-        }
-        Dataset.ofRows(sparkSession, DataSourceV2Relation.create(
-          ds, sessionOptions ++ extraOptions.toMap + pathsOption,
-          userSpecifiedSchema = userSpecifiedSchema))
-      } else {
-        loadV1Source(paths: _*)
-      }
-    } else {
-      loadV1Source(paths: _*)
-    }
+    loadV1Source(paths: _*)
   }
 
   private def loadV1Source(paths: String*) = {
