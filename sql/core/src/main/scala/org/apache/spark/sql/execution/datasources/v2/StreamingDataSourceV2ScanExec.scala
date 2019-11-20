@@ -27,8 +27,7 @@ import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
 import org.apache.spark.sql.execution.{ColumnarBatchScan, LeafExecNode, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.streaming.continuous._
 import org.apache.spark.sql.sources.v2.DataSourceV2
-import org.apache.spark.sql.sources.v2.reader._
-import org.apache.spark.sql.sources.v2.reader.streaming.ContinuousReader
+import org.apache.spark.sql.sources.v2.reader.streaming.{ContinuousReader, DataSourceReader, InputPartition, SupportsScanColumnarBatch}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -92,10 +91,10 @@ case class StreamingDataSourceV2ScanExec(
         partitions).asInstanceOf[RDD[InternalRow]]
 
     case r: SupportsScanColumnarBatch if r.enableBatchRead() =>
-      new DataSourceRDD(sparkContext, batchPartitions).asInstanceOf[RDD[InternalRow]]
+      new StreamingDataSourceRDD(sparkContext, batchPartitions).asInstanceOf[RDD[InternalRow]]
 
     case _ =>
-      new DataSourceRDD(sparkContext, partitions).asInstanceOf[RDD[InternalRow]]
+      new StreamingDataSourceRDD(sparkContext, partitions).asInstanceOf[RDD[InternalRow]]
   }
 
   override def inputRDDs(): Seq[RDD[InternalRow]] = Seq(inputRDD)

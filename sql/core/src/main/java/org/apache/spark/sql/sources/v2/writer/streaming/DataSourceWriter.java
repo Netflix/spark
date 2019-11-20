@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.sources.v2.writer;
+package org.apache.spark.sql.sources.v2.writer.streaming;
 
 import org.apache.spark.annotation.InterfaceStability;
 import org.apache.spark.sql.catalyst.InternalRow;

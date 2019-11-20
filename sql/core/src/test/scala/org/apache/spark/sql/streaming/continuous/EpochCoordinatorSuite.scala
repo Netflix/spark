@@ -28,8 +28,7 @@ import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.sql.LocalSparkSession
 import org.apache.spark.sql.execution.streaming.continuous._
 import org.apache.spark.sql.sources.v2.reader.streaming.{ContinuousReader, PartitionOffset}
-import org.apache.spark.sql.sources.v2.writer.WriterCommitMessage
-import org.apache.spark.sql.sources.v2.writer.streaming.StreamWriter
+import org.apache.spark.sql.sources.v2.writer.streaming.{StreamWriter, WriterCommitMessage}
 import org.apache.spark.sql.test.TestSparkSession
 
 class EpochCoordinatorSuite

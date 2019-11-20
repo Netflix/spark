@@ -34,7 +34,7 @@ import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.sources.v2.DataSourceOptions
 import org.apache.spark.sql.sources.v2.reader._
-import org.apache.spark.sql.sources.v2.reader.streaming.{MicroBatchReader, Offset}
+import org.apache.spark.sql.sources.v2.reader.streaming.{InputPartition, InputPartitionReader, MicroBatchReader, Offset}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.{ManualClock, SystemClock}
 

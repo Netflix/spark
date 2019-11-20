@@ -15,18 +15,20 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.sources.v2.reader;
-
-import java.util.OptionalLong;
+package org.apache.spark.sql.sources.v2.reader.streaming;
 
 import org.apache.spark.annotation.InterfaceStability;
 
 /**
- * An interface to represent statistics for a data source, which is returned by
- * {@link SupportsReportStatistics#estimateStatistics()}.
+ * A mix-in interface for {@link InputPartition}. Continuous input partitions can
+ * implement this interface to provide creating {@link InputPartitionReader} with particular offset.
  */
 @InterfaceStability.Evolving
-public interface Statistics {
-  OptionalLong sizeInBytes();
-  OptionalLong numRows();
+public interface ContinuousInputPartition<T> extends InputPartition<T> {
+  /**
+   * Create an input partition reader with particular offset as its startOffset.
+   *
+   * @param offset offset want to set as the input partition reader's startOffset.
+   */
+  InputPartitionReader<T> createContinuousReader(PartitionOffset offset);
 }

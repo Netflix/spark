@@ -18,9 +18,6 @@
 package org.apache.spark.sql.sources.v2.writer.streaming;
 
 import org.apache.spark.annotation.InterfaceStability;
-import org.apache.spark.sql.sources.v2.writer.DataSourceWriter;
-import org.apache.spark.sql.sources.v2.writer.DataWriter;
-import org.apache.spark.sql.sources.v2.writer.WriterCommitMessage;
 
 /**
  * A {@link DataSourceWriter} for use with structured streaming.

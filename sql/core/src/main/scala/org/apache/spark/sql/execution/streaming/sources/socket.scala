@@ -36,8 +36,7 @@ import org.apache.spark.sql.execution.streaming.LongOffset
 import org.apache.spark.sql.execution.streaming.continuous.TextSocketContinuousReader
 import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.sources.v2.{ContinuousReadSupport, DataSourceOptions, DataSourceV2, MicroBatchReadSupport}
-import org.apache.spark.sql.sources.v2.reader.{InputPartition, InputPartitionReader}
-import org.apache.spark.sql.sources.v2.reader.streaming.{ContinuousReader, MicroBatchReader, Offset}
+import org.apache.spark.sql.sources.v2.reader.streaming.{ContinuousReader, InputPartition, InputPartitionReader, MicroBatchReader, Offset}
 import org.apache.spark.sql.types.{StringType, StructField, StructType, TimestampType}
 import org.apache.spark.unsafe.types.UTF8String
 

@@ -25,8 +25,7 @@ import scala.util.control.NonFatal
 import org.apache.spark.{SparkEnv, SparkException, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.sources.v2.reader.{InputPartition, InputPartitionReader}
-import org.apache.spark.sql.sources.v2.reader.streaming.PartitionOffset
+import org.apache.spark.sql.sources.v2.reader.streaming.{InputPartitionReader, PartitionOffset}
 import org.apache.spark.util.ThreadUtils
 
 /**

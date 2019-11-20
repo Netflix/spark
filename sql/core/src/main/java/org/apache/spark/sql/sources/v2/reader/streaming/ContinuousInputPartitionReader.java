@@ -18,7 +18,6 @@
 package org.apache.spark.sql.sources.v2.reader.streaming;
 
 import org.apache.spark.annotation.InterfaceStability;
-import org.apache.spark.sql.sources.v2.reader.InputPartitionReader;
 
 /**
  * A variation on {@link InputPartitionReader} for use with streaming in continuous processing mode.

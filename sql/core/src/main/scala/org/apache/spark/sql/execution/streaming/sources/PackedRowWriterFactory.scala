@@ -21,7 +21,7 @@ import scala.collection.mutable
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.sources.v2.writer.{DataSourceWriter, DataWriter, DataWriterFactory, WriterCommitMessage}
+import org.apache.spark.sql.sources.v2.writer.streaming.{DataSourceWriter, DataWriter, DataWriterFactory, WriterCommitMessage}
 
 /**
  * A simple [[DataWriterFactory]] whose tasks just pack rows into the commit message for delivery

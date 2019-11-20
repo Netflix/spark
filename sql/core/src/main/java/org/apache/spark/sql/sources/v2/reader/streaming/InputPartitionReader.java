@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.sources.v2.reader;
+package org.apache.spark.sql.sources.v2.reader.streaming;
 
 import java.io.Closeable;
 import java.io.IOException;

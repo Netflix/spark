@@ -15,23 +15,19 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.sources.v2.reader;
+package org.apache.spark.sql.sources.v2.writer.streaming;
+
+import java.io.Serializable;
 
 import org.apache.spark.annotation.InterfaceStability;
 
 /**
- * A mix in interface for {@link DataSourceReader}. Data source readers can implement this
- * interface to report statistics to Spark.
+ * A commit message returned by {@link DataWriter#commit()} and will be sent back to the driver side
+ * as the input parameter of {@link DataSourceWriter#commit(WriterCommitMessage[])}.
  *
- * As of Spark 2.4, statistics are reported to the optimizer before any operator is pushed to the
- * DataSourceReader. Implementations that return more accurate statistics based on pushed operators
- * will not improve query performance until the planner can push operators before getting stats.
+ * This is an empty interface, data sources should define their own message class and use it in
+ * their {@link DataWriter#commit()} and {@link DataSourceWriter#commit(WriterCommitMessage[])}
+ * implementations.
  */
 @InterfaceStability.Evolving
-public interface SupportsReportStatistics extends DataSourceReader {
-
-  /**
-   * Returns the estimated statistics of this data source.
-   */
-  Statistics estimateStatistics();
-}
+public interface WriterCommitMessage extends Serializable {}

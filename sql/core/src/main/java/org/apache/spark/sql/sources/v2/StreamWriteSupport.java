@@ -19,7 +19,7 @@ package org.apache.spark.sql.sources.v2;
 
 import org.apache.spark.annotation.InterfaceStability;
 import org.apache.spark.sql.execution.streaming.BaseStreamingSink;
-import org.apache.spark.sql.sources.v2.writer.DataSourceWriter;
+import org.apache.spark.sql.sources.v2.writer.streaming.DataSourceWriter;
 import org.apache.spark.sql.sources.v2.writer.streaming.StreamWriter;
 import org.apache.spark.sql.streaming.OutputMode;
 import org.apache.spark.sql.types.StructType;

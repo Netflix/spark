@@ -18,7 +18,6 @@
 package org.apache.spark.sql.sources.v2.reader.streaming;
 
 import org.apache.spark.annotation.InterfaceStability;
-import org.apache.spark.sql.sources.v2.reader.DataSourceReader;
 import org.apache.spark.sql.execution.streaming.BaseStreamingSource;
 
 import java.util.Optional;

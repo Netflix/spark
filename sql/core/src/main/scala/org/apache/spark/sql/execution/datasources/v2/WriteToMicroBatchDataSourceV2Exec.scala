@@ -28,7 +28,7 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.streaming.MicroBatchExecution
-import org.apache.spark.sql.sources.v2.writer._
+import org.apache.spark.sql.sources.v2.writer.streaming.{DataSourceWriter, DataWriterFactory, WriterCommitMessage}
 import org.apache.spark.util.Utils
 
 /**
@@ -63,7 +63,7 @@ case class WriteToMicroBatchDataSourceV2Exec(writer: DataSourceWriter, query: Sp
       sparkContext.runJob(
         rdd,
         (context: TaskContext, iter: Iterator[InternalRow]) =>
-          DataWritingSparkTask.run(writeTask, context, iter, useCommitCoordinator),
+          DataWritingSparkStreamingTask.run(writeTask, context, iter, useCommitCoordinator),
         rdd.partitions.indices,
         (index, message: WriterCommitMessage) => {
           messages(index) = message
@@ -97,7 +97,7 @@ case class WriteToMicroBatchDataSourceV2Exec(writer: DataSourceWriter, query: Sp
   }
 }
 
-object DataWritingSparkTask extends Logging {
+object DataWritingSparkStreamingTask extends Logging {
   def run(
       writeTask: DataWriterFactory[InternalRow],
       context: TaskContext,

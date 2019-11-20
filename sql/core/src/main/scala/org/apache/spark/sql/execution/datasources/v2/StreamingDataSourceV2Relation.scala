@@ -21,7 +21,7 @@ import org.apache.spark.sql.catalyst.analysis.MultiInstanceRelation
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LogicalPlan, Statistics}
 import org.apache.spark.sql.sources.v2.DataSourceV2
-import org.apache.spark.sql.sources.v2.reader.{DataSourceReader, SupportsReportStatistics}
+import org.apache.spark.sql.sources.v2.reader.streaming.{DataSourceReader, SupportsReportStatistics}
 
 /**
  * A DSv2 relation for streaming.

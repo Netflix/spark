@@ -22,8 +22,7 @@ import org.apache.spark.sql.{Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
 import org.apache.spark.sql.sources.v2.DataSourceOptions
-import org.apache.spark.sql.sources.v2.writer.{DataWriterFactory, WriterCommitMessage}
-import org.apache.spark.sql.sources.v2.writer.streaming.StreamWriter
+import org.apache.spark.sql.sources.v2.writer.streaming.{DataWriterFactory, StreamWriter, WriterCommitMessage}
 import org.apache.spark.sql.types.StructType
 
 /** Common methods used to create writes for the the console sink */

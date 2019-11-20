@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.sources.v2.writer;
+package org.apache.spark.sql.sources.v2.writer.streaming;
 
 import java.io.Serializable;
 
