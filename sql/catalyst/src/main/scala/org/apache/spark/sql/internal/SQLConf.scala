@@ -35,6 +35,7 @@ import org.apache.spark.network.util.ByteUnit
 import org.apache.spark.sql.catalyst.analysis.Resolver
 import org.apache.spark.sql.catalyst.expressions.CodegenObjectFactoryMode
 import org.apache.spark.sql.catalyst.expressions.codegen.CodeGenerator
+import org.apache.spark.sql.connector.catalog.CatalogManager.SESSION_CATALOG_NAME
 import org.apache.spark.unsafe.array.ByteArrayMethods
 import org.apache.spark.util.Utils
 
@@ -1559,6 +1560,22 @@ object SQLConf {
         "turning the flag on provides a way for these sources to see these partitionBy columns.")
       .booleanConf
       .createWithDefault(false)
+
+  val DEFAULT_CATALOG = buildConf("spark.sql.defaultCatalog")
+      .doc("Name of the default catalog. This will be the current catalog if users have not " +
+          "explicitly set the current catalog yet.")
+      .stringConf
+      .createWithDefault(SESSION_CATALOG_NAME)
+
+  val V2_SESSION_CATALOG_IMPLEMENTATION = buildConf(s"spark.sql.catalog.$SESSION_CATALOG_NAME")
+      .doc("A catalog implementation that will be used as the v2 interface to Spark's built-in " +
+        s"v1 catalog: $SESSION_CATALOG_NAME. This catalog shares its identifier namespace with " +
+        s"the $SESSION_CATALOG_NAME and must be consistent with it; for example, if a table can " +
+        s"be loaded by the $SESSION_CATALOG_NAME, this catalog must also return the table " +
+        s"metadata. To delegate operations to the $SESSION_CATALOG_NAME, implementations can " +
+        "extend 'CatalogExtension'.")
+      .stringConf
+      .createOptional
 }
 
 /**
