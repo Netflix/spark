@@ -76,15 +76,22 @@ singleTableSchema
 
 statement
     : query                                                            #statementDefault
-    | USE db=identifier                                                #use
-    | CREATE DATABASE (IF NOT EXISTS)? identifier
-        (COMMENT comment=STRING)? locationSpec?
-        (WITH DBPROPERTIES tablePropertyList)?                         #createDatabase
-    | ALTER DATABASE identifier SET DBPROPERTIES tablePropertyList     #setDatabaseProperties
-    | DROP DATABASE (IF EXISTS)? identifier (RESTRICT | CASCADE)?      #dropDatabase
+    | USE NAMESPACE? multipartIdentifier                               #use
+    | CREATE (database | NAMESPACE) (IF NOT EXISTS)? multipartIdentifier
+        ((COMMENT comment=STRING) |
+         locationSpec |
+         (WITH (DBPROPERTIES | PROPERTIES) tablePropertyList))*        #createNamespace
+    | ALTER (database | NAMESPACE) multipartIdentifier
+        SET (DBPROPERTIES | PROPERTIES) tablePropertyList              #setNamespaceProperties
+    | ALTER (database | NAMESPACE) multipartIdentifier
+        SET locationSpec                                               #setNamespaceLocation
+    | DROP (database | NAMESPACE) (IF EXISTS)? multipartIdentifier
+        (RESTRICT | CASCADE)?                                          #dropNamespace
+    | SHOW (DATABASES | NAMESPACES) ((FROM | IN) multipartIdentifier)?
+        (LIKE? pattern=STRING)?                                        #showNamespaces
     | createTableHeader ('(' colTypeList ')')? tableProvider
         ((OPTIONS options=tablePropertyList) |
-        (PARTITIONED BY partitionColumnNames=identifierList) |
+        (PARTITIONED BY partitioning=transformList) |
         bucketSpec |
         locationSpec |
         (COMMENT comment=STRING) |
@@ -101,78 +108,101 @@ statement
         (TBLPROPERTIES tableProps=tablePropertyList))*
         (AS? query)?                                                   #createHiveTable
     | CREATE TABLE (IF NOT EXISTS)? target=tableIdentifier
-        LIKE source=tableIdentifier locationSpec?                      #createTableLike
-    | ANALYZE TABLE tableIdentifier partitionSpec? COMPUTE STATISTICS
-        (identifier | FOR COLUMNS identifierSeq)?                      #analyze
-    | ALTER TABLE tableIdentifier
-        ADD COLUMNS '(' columns=colTypeList ')'                        #addTableColumns
-    | ALTER (TABLE | VIEW) from=tableIdentifier
-        RENAME TO to=tableIdentifier                                   #renameTable
-    | ALTER (TABLE | VIEW) tableIdentifier
+        LIKE source=tableIdentifier tableProvider? locationSpec?       #createTableLike
+    | replaceTableHeader ('(' colTypeList ')')? tableProvider
+        ((OPTIONS options=tablePropertyList) |
+        (PARTITIONED BY partitioning=transformList) |
+        bucketSpec |
+        locationSpec |
+        (COMMENT comment=STRING) |
+        (TBLPROPERTIES tableProps=tablePropertyList))*
+        (AS? query)?                                                   #replaceTable
+    | ANALYZE TABLE multipartIdentifier partitionSpec? COMPUTE STATISTICS
+        (identifier | FOR COLUMNS identifierSeq | FOR ALL COLUMNS)?    #analyze
+    | ALTER TABLE multipartIdentifier
+        ADD (COLUMN | COLUMNS)
+        columns=qualifiedColTypeWithPositionList                       #addTableColumns
+    | ALTER TABLE multipartIdentifier
+        ADD (COLUMN | COLUMNS)
+        '(' columns=qualifiedColTypeWithPositionList ')'               #addTableColumns
+    | ALTER TABLE table=multipartIdentifier
+        RENAME COLUMN
+        from=multipartIdentifier TO to=multipartIdentifier             #renameTableColumn
+    | ALTER TABLE multipartIdentifier
+        DROP (COLUMN | COLUMNS)
+        '(' columns=multipartIdentifierList ')'                        #dropTableColumns
+    | ALTER TABLE multipartIdentifier
+        DROP (COLUMN | COLUMNS) columns=multipartIdentifierList        #dropTableColumns
+    | ALTER (TABLE | VIEW) from=multipartIdentifier
+        RENAME TO to=multipartIdentifier                               #renameTable
+    | ALTER (TABLE | VIEW) multipartIdentifier
         SET TBLPROPERTIES tablePropertyList                            #setTableProperties
-    | ALTER (TABLE | VIEW) tableIdentifier
+    | ALTER (TABLE | VIEW) multipartIdentifier
         UNSET TBLPROPERTIES (IF EXISTS)? tablePropertyList             #unsetTableProperties
-    | ALTER TABLE tableIdentifier partitionSpec?
-        CHANGE COLUMN? identifier colType colPosition?                 #changeColumn
-    | ALTER TABLE tableIdentifier (partitionSpec)?
+    | ALTER TABLE table=multipartIdentifier
+        (ALTER | CHANGE) COLUMN? column=multipartIdentifier
+        (TYPE dataType)? (COMMENT comment=STRING)? colPosition?        #alterTableColumn
+    | ALTER TABLE multipartIdentifier (partitionSpec)?
         SET SERDE STRING (WITH SERDEPROPERTIES tablePropertyList)?     #setTableSerDe
-    | ALTER TABLE tableIdentifier (partitionSpec)?
+    | ALTER TABLE multipartIdentifier (partitionSpec)?
         SET SERDEPROPERTIES tablePropertyList                          #setTableSerDe
-    | ALTER TABLE tableIdentifier ADD (IF NOT EXISTS)?
+    | ALTER (TABLE | VIEW) multipartIdentifier ADD (IF NOT EXISTS)?
         partitionSpecLocation+                                         #addTablePartition
-    | ALTER VIEW tableIdentifier ADD (IF NOT EXISTS)?
-        partitionSpec+                                                 #addTablePartition
-    | ALTER TABLE tableIdentifier
+    | ALTER TABLE multipartIdentifier
         from=partitionSpec RENAME TO to=partitionSpec                  #renameTablePartition
-    | ALTER TABLE tableIdentifier
+    | ALTER (TABLE | VIEW) multipartIdentifier
         DROP (IF EXISTS)? partitionSpec (',' partitionSpec)* PURGE?    #dropTablePartitions
-    | ALTER VIEW tableIdentifier
-        DROP (IF EXISTS)? partitionSpec (',' partitionSpec)*           #dropTablePartitions
-    | ALTER TABLE tableIdentifier partitionSpec? SET locationSpec      #setTableLocation
-    | ALTER TABLE tableIdentifier RECOVER PARTITIONS                   #recoverPartitions
-    | DROP TABLE (IF EXISTS)? tableIdentifier PURGE?                   #dropTable
-    | DROP VIEW (IF EXISTS)? tableIdentifier                           #dropTable
+    | ALTER TABLE multipartIdentifier
+        (partitionSpec)? SET locationSpec                              #setTableLocation
+    | ALTER TABLE multipartIdentifier RECOVER PARTITIONS               #recoverPartitions
+    | DROP TABLE (IF EXISTS)? multipartIdentifier PURGE?               #dropTable
+    | DROP VIEW (IF EXISTS)? multipartIdentifier                       #dropView
     | CREATE (OR REPLACE)? (GLOBAL? TEMPORARY)?
-        VIEW (IF NOT EXISTS)? tableIdentifier
-        identifierCommentList? (COMMENT STRING)?
-        (PARTITIONED ON identifierList)?
-        (TBLPROPERTIES tablePropertyList)? AS query                    #createView
+        VIEW (IF NOT EXISTS)? multipartIdentifier
+        identifierCommentList?
+        ((COMMENT STRING) |
+         (PARTITIONED ON identifierList) |
+         (TBLPROPERTIES tablePropertyList))*
+        AS query                                                       #createView
     | CREATE (OR REPLACE)? GLOBAL? TEMPORARY VIEW
-        tableIdentifier ('(' colTypeList ')')? tableProvider
+        multipartIdentifier ('(' colTypeList ')')? tableProvider
         (OPTIONS tablePropertyList)?                                   #createTempViewUsing
-    | ALTER VIEW tableIdentifier AS? query                             #alterViewQuery
+    | ALTER VIEW multipartIdentifier AS? query                         #alterViewQuery
     | CREATE (OR REPLACE)? TEMPORARY? FUNCTION (IF NOT EXISTS)?
         qualifiedName AS className=STRING
         (USING resource (',' resource)*)?                              #createFunction
     | DROP TEMPORARY? FUNCTION (IF EXISTS)? qualifiedName              #dropFunction
     | EXPLAIN (LOGICAL | FORMATTED | EXTENDED | CODEGEN | COST)?
         statement                                                      #explain
-    | SHOW TABLES ((FROM | IN) db=identifier)?
+    | SHOW TABLES ((FROM | IN) multipartIdentifier)?
         (LIKE? pattern=STRING)?                                        #showTables
-    | SHOW TABLE EXTENDED ((FROM | IN) db=identifier)?
+    | SHOW TABLE EXTENDED ((FROM | IN) namespace=multipartIdentifier)?
         LIKE pattern=STRING partitionSpec?                             #showTable
     | SHOW DATABASES (LIKE? pattern=STRING)?                           #showDatabases
-    | SHOW TBLPROPERTIES table=tableIdentifier
+    | SHOW TBLPROPERTIES table=multipartIdentifier
         ('(' key=tablePropertyKey ')')?                                #showTblProperties
-    | SHOW COLUMNS (FROM | IN) tableIdentifier
-        ((FROM | IN) db=identifier)?                                   #showColumns
-    | SHOW PARTITIONS tableIdentifier partitionSpec?                   #showPartitions
+    | SHOW COLUMNS (FROM | IN) table=multipartIdentifier
+        ((FROM | IN) namespace=multipartIdentifier)?                   #showColumns
+    | SHOW PARTITIONS multipartIdentifier partitionSpec?               #showPartitions
     | SHOW identifier? FUNCTIONS
         (LIKE? (qualifiedName | pattern=STRING))?                      #showFunctions
-    | SHOW CREATE TABLE tableIdentifier                                #showCreateTable
+    | SHOW CREATE TABLE multipartIdentifier                            #showCreateTable
+    | SHOW CURRENT NAMESPACE                                           #showCurrentNamespace
     | (DESC | DESCRIBE) FUNCTION EXTENDED? describeFuncName            #describeFunction
-    | (DESC | DESCRIBE) DATABASE EXTENDED? identifier                  #describeDatabase
+    | (DESC | DESCRIBE) (database | NAMESPACE) EXTENDED?
+        multipartIdentifier                                            #describeNamespace
     | (DESC | DESCRIBE) TABLE? option=(EXTENDED | FORMATTED)?
-        tableIdentifier partitionSpec? describeColName?                #describeTable
-    | REFRESH TABLE tableIdentifier                                    #refreshTable
+        multipartIdentifier partitionSpec? describeColName?            #describeTable
+    | REFRESH TABLE multipartIdentifier                                #refreshTable
     | REFRESH (STRING | .*?)                                           #refreshResource
-    | CACHE LAZY? TABLE tableIdentifier (AS? query)?                   #cacheTable
-    | UNCACHE TABLE (IF EXISTS)? tableIdentifier                       #uncacheTable
+    | CACHE LAZY? TABLE multipartIdentifier
+        (OPTIONS options=tablePropertyList)? (AS? query)?              #cacheTable
+    | UNCACHE TABLE (IF EXISTS)? multipartIdentifier                   #uncacheTable
     | CLEAR CACHE                                                      #clearCache
     | LOAD DATA LOCAL? INPATH path=STRING OVERWRITE? INTO TABLE
-        tableIdentifier partitionSpec?                                 #loadData
-    | TRUNCATE TABLE tableIdentifier partitionSpec?                    #truncateTable
-    | MSCK REPAIR TABLE tableIdentifier                                #repairTable
+        multipartIdentifier partitionSpec?                             #loadData
+    | TRUNCATE TABLE multipartIdentifier partitionSpec?                #truncateTable
+    | MSCK REPAIR TABLE multipartIdentifier                            #repairTable
     | op=(ADD | LIST) identifier .*?                                   #manageResource
     | SET ROLE .*?                                                     #failNativeCommand
     | SET .*?                                                          #setConfiguration
@@ -225,11 +255,14 @@ unsupportedHiveNativeCommands
     | kw1=COMMIT
     | kw1=ROLLBACK
     | kw1=DFS
-    | kw1=DELETE kw2=FROM
     ;
 
 createTableHeader
-    : CREATE TEMPORARY? EXTERNAL? TABLE (IF NOT EXISTS)? tableIdentifier
+    : CREATE TEMPORARY? EXTERNAL? TABLE (IF NOT EXISTS)? multipartIdentifier
+    ;
+
+replaceTableHeader
+    : (CREATE OR)? REPLACE TABLE multipartIdentifier
     ;
 
 bucketSpec
@@ -253,8 +286,8 @@ query
     ;
 
 insertInto
-    : INSERT OVERWRITE TABLE tableIdentifier (partitionSpec (IF NOT EXISTS)?)?                              #insertOverwriteTable
-    | INSERT INTO TABLE? tableIdentifier partitionSpec?                                                     #insertIntoTable
+    : INSERT OVERWRITE TABLE? multipartIdentifier (partitionSpec (IF NOT EXISTS)?)?                         #insertOverwriteTable
+    | INSERT INTO TABLE? multipartIdentifier partitionSpec? (IF NOT EXISTS)?                                #insertIntoTable
     | INSERT OVERWRITE LOCAL? DIRECTORY path=STRING rowFormat? createFileFormat?                            #insertOverwriteHiveDir
     | INSERT OVERWRITE LOCAL? DIRECTORY (path=STRING)? tableProvider (OPTIONS options=tablePropertyList)?   #insertOverwriteDir
     ;
@@ -269,6 +302,11 @@ partitionSpec
 
 partitionVal
     : identifier (EQ constant)?
+    ;
+
+database
+    : DATABASE
+    | SCHEMA
     ;
 
 describeFuncName
@@ -292,7 +330,7 @@ namedQuery
     ;
 
 tableProvider
-    : USING qualifiedName
+    : USING multipartIdentifier
     ;
 
 tablePropertyList
@@ -342,8 +380,9 @@ resource
     ;
 
 queryNoWith
-    : insertInto? queryTerm queryOrganization                                              #singleInsertQuery
-    | fromClause multiInsertQueryBody+                                                     #multiInsertQuery
+    : insertInto? queryTerm queryOrganization                                      #singleInsertQuery
+    | fromClause multiInsertQueryBody+                                             #multiInsertQuery
+    | DELETE FROM multipartIdentifier tableAlias (WHERE where=booleanExpression)?  #deleteFromTable
     ;
 
 queryOrganization
@@ -373,7 +412,7 @@ queryTerm
 
 queryPrimary
     : querySpecification                                                    #queryPrimaryDefault
-    | TABLE tableIdentifier                                                 #table
+    | TABLE multipartIdentifier                                             #table
     | inlineTable                                                           #inlineTableDefault1
     | '(' queryNoWith  ')'                                                  #subquery
     ;
@@ -512,7 +551,7 @@ identifierComment
     ;
 
 relationPrimary
-    : tableIdentifier sample? tableAlias      #tableName
+    : multipartIdentifier sample? tableAlias  #tableName
     | '(' queryNoWith ')' sample? tableAlias  #aliasedQuery
     | '(' relation ')' sample? tableAlias     #aliasedRelation
     | inlineTable                             #inlineTableDefault2
@@ -563,6 +602,21 @@ namedExpression
 
 namedExpressionSeq
     : namedExpression (',' namedExpression)*
+    ;
+
+transformList
+    : '(' transforms+=transform (',' transforms+=transform)* ')'
+    ;
+
+transform
+    : qualifiedName                                                           #identityTransform
+    | transformName=identifier
+      '(' argument+=transformArgument (',' argument+=transformArgument)* ')'  #applyTransform
+    ;
+
+transformArgument
+    : qualifiedName
+    | constant
     ;
 
 expression
@@ -662,7 +716,7 @@ intervalValue
     ;
 
 colPosition
-    : FIRST | AFTER identifier
+    : FIRST | AFTER multipartIdentifier
     ;
 
 dataType
@@ -670,6 +724,14 @@ dataType
     | complex=MAP '<' dataType ',' dataType '>'                 #complexDataType
     | complex=STRUCT ('<' complexColTypeList? '>' | NEQ)        #complexDataType
     | identifier ('(' INTEGER_VALUE (',' INTEGER_VALUE)* ')')?  #primitiveDataType
+    ;
+
+qualifiedColTypeWithPositionList
+    : qualifiedColTypeWithPosition (',' qualifiedColTypeWithPosition)*
+    ;
+
+qualifiedColTypeWithPosition
+    : name=multipartIdentifier dataType (COMMENT comment=STRING)? colPosition?
     ;
 
 colTypeList
@@ -724,6 +786,10 @@ frameBound
     | expression boundType=(PRECEDING | FOLLOWING)
     ;
 
+qualifiedNameList
+    : qualifiedName (',' qualifiedName)*
+    ;
+
 qualifiedName
     : identifier ('.' identifier)*
     ;
@@ -775,7 +841,7 @@ nonReserved
     | SORT | CLUSTER | DISTRIBUTE | UNSET | TBLPROPERTIES | SKEWED | STORED | DIRECTORIES | LOCATION
     | EXCHANGE | ARCHIVE | UNARCHIVE | FILEFORMAT | TOUCH | COMPACT | CONCATENATE | CHANGE
     | CASCADE | RESTRICT | BUCKETS | CLUSTERED | SORTED | PURGE | INPUTFORMAT | OUTPUTFORMAT
-    | DBPROPERTIES | DFS | TRUNCATE | COMPUTE | LIST
+    | PROPERTIES | DBPROPERTIES | DFS | TRUNCATE | COMPUTE | LIST
     | STATISTICS | ANALYZE | PARTITIONED | EXTERNAL | DEFINED | RECORDWRITER
     | REVOKE | GRANT | LOCK | UNLOCK | MSCK | REPAIR | RECOVER | EXPORT | IMPORT | LOAD | VALUES | COMMENT | ROLE
     | ROLES | COMPACTIONS | PRINCIPALS | TRANSACTIONS | INDEX | INDEXES | LOCKS | OPTION | LOCAL | INPATH
@@ -788,6 +854,7 @@ nonReserved
     | DATABASE | SELECT | FROM | WHERE | HAVING | TO | TABLE | WITH | NOT
     | DIRECTORY
     | BOTH | LEADING | TRAILING
+    | TYPE | NAMESPACE | NAMESPACES | SCHEMA
     ;
 
 SELECT: 'SELECT';
@@ -1024,6 +1091,12 @@ OPTION: 'OPTION';
 ANTI: 'ANTI';
 LOCAL: 'LOCAL';
 INPATH: 'INPATH';
+
+TYPE: 'TYPE';
+NAMESPACE: 'NAMESPACE';
+NAMESPACES: 'NAMESPACES';
+SCHEMA: 'SCHEMA';
+PROPERTIES: 'PROPERTIES';
 
 STRING
     : '\'' ( ~('\''|'\\') | ('\\' .) )* '\''
