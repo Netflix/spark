@@ -1377,6 +1377,14 @@ object SQLConf {
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefault(100)
 
+  val USE_V1_SOURCE_LIST = buildConf("spark.sql.sources.useV1SourceList")
+      .internal()
+      .doc("A comma-separated list of data source short names or fully qualified data source " +
+          "implementation class names for which Data Source V2 code path is disabled. These data " +
+          "sources will fallback to Data Source V1 code path.")
+      .stringConf
+      .createWithDefault("kafka")
+
   val DISABLED_V2_STREAMING_WRITERS = buildConf("spark.sql.streaming.disabledV2Writers")
     .internal()
     .doc("A comma-separated list of fully qualified data source register class names for which" +
