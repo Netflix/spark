@@ -309,6 +309,55 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
     nameToIndex.get(name)
   }
 
+  /**
+   * Returns a field in this struct and its child structs.
+   *
+   * If includeCollections is true, this will return fields that are nested in maps and arrays.
+   */
+  private[sql] def findNestedField(
+      fieldNames: Seq[String],
+      includeCollections: Boolean = false): Option[StructField] = {
+    fieldNames.headOption.flatMap(nameToField.get) match {
+      case Some(field) =>
+        (fieldNames.tail, field.dataType, includeCollections) match {
+          case (Seq(), _, _) =>
+            Some(field)
+
+          case (names, struct: StructType, _) =>
+            struct.findNestedField(names, includeCollections)
+
+          case (_, _, false) =>
+            None // types nested in maps and arrays are not used
+
+          case (Seq("key"), MapType(keyType, _, _), true) =>
+            // return the key type as a struct field to include nullability
+            Some(StructField("key", keyType, nullable = false))
+
+          case (Seq("key", names @ _*), MapType(struct: StructType, _, _), true) =>
+            struct.findNestedField(names, includeCollections)
+
+          case (Seq("value"), MapType(_, valueType, isNullable), true) =>
+            // return the value type as a struct field to include nullability
+            Some(StructField("value", valueType, nullable = isNullable))
+
+          case (Seq("value", names @ _*), MapType(_, struct: StructType, _), true) =>
+            struct.findNestedField(names, includeCollections)
+
+          case (Seq("element"), ArrayType(elementType, isNullable), true) =>
+            // return the element type as a struct field to include nullability
+            Some(StructField("element", elementType, nullable = isNullable))
+
+          case (Seq("element", names @ _*), ArrayType(struct: StructType, _), true) =>
+            struct.findNestedField(names, includeCollections)
+
+          case _ =>
+            None
+        }
+      case _ =>
+        None
+    }
+  }
+
   protected[sql] def toAttributes: Seq[AttributeReference] =
     map(f => AttributeReference(f.name, f.dataType, f.nullable, f.metadata)())
 
