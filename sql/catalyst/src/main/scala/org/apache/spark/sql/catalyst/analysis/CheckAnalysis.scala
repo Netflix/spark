@@ -17,14 +17,14 @@
 
 package org.apache.spark.sql.catalyst.analysis
 
-import org.apache.spark.api.python.PythonEvalType
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.SubExprUtils._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.optimizer.BooleanSimplification
 import org.apache.spark.sql.catalyst.plans._
-import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoStatement, _}
+import org.apache.spark.sql.connector.catalog.TableChange.{AddColumn, DeleteColumn, RenameColumn, UpdateColumnComment, UpdateColumnType}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
@@ -32,6 +32,10 @@ import org.apache.spark.sql.types._
  * Throws user facing errors when passed invalid queries that fail to analyze.
  */
 trait CheckAnalysis extends PredicateHelper {
+
+  protected def isView(nameParts: Seq[String]): Boolean
+
+  import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
 
   /**
    * Override to provide additional checks for correct analysis.
@@ -88,7 +92,31 @@ trait CheckAnalysis extends PredicateHelper {
       case p if p.analyzed => // Skip already analyzed sub-plans
 
       case u: UnresolvedRelation =>
-        u.failAnalysis(s"Table or view not found: ${u.tableIdentifier}")
+        u.failAnalysis(s"Table or view not found: ${u.multipartIdentifier.quoted}")
+
+      case InsertIntoStatement(u: UnresolvedRelation, _, _, _, _) =>
+        failAnalysis(s"Table not found: ${u.multipartIdentifier.quoted}")
+
+      case u: UnresolvedV2Relation if isView(u.originalNameParts) =>
+        u.failAnalysis(
+          s"Invalid command: '${u.originalNameParts.quoted}' is a view not a table.")
+
+      case u: UnresolvedV2Relation =>
+        u.failAnalysis(s"Table not found: ${u.originalNameParts.quoted}")
+
+      case AlterTable(_, _, u: UnresolvedV2Relation, _) if isView(u.originalNameParts) =>
+        u.failAnalysis(
+          s"Invalid command: '${u.originalNameParts.quoted}' is a view not a table.")
+
+      case AlterTable(_, _, u: UnresolvedV2Relation, _) =>
+        failAnalysis(s"Table not found: ${u.originalNameParts.quoted}")
+
+      case DescribeTable(u: UnresolvedV2Relation, _) if isView(u.originalNameParts) =>
+        u.failAnalysis(
+          s"Invalid command: '${u.originalNameParts.quoted}' is a view not a table.")
+
+      case DescribeTable(u: UnresolvedV2Relation, _) =>
+        failAnalysis(s"Table not found: ${u.originalNameParts.quoted}")
 
       case operator: LogicalPlan =>
         // Check argument data types of higher-order functions downwards first.
@@ -301,6 +329,21 @@ trait CheckAnalysis extends PredicateHelper {
               }
             }
 
+          case create: V2CreateTablePlan =>
+            val references = create.partitioning.flatMap(_.references).toSet
+            val badReferences = references.map(_.fieldNames).flatMap { column =>
+              create.tableSchema.findNestedField(column) match {
+                case Some(_) =>
+                  None
+                case _ =>
+                  Some(s"${column.quoted} is missing or is in a map or array")
+              }
+            }
+
+            if (badReferences.nonEmpty) {
+              failAnalysis(s"Invalid partitioning: ${badReferences.mkString(", ")}")
+            }
+
           // If the view output doesn't have the same number of columns neither with the child
           // output, nor with the query column names, throw an AnalysisException.
           // If the view's child output can't up cast to the view output,
@@ -341,6 +384,61 @@ trait CheckAnalysis extends PredicateHelper {
                     "as it may truncate\n")
                 }
               case _ =>
+            }
+
+          case alter: AlterTable if alter.childrenResolved =>
+            val table = alter.table
+            def findField(operation: String, fieldName: Array[String]): StructField = {
+              // include collections because structs nested in maps and arrays may be altered
+              val field = table.schema.findNestedField(fieldName, includeCollections = true)
+              if (field.isEmpty) {
+                throw new AnalysisException(
+                  s"Cannot $operation missing field in ${table.name} schema: ${fieldName.quoted}")
+              }
+              field.get
+            }
+
+            alter.changes.foreach {
+              case add: AddColumn =>
+                val parent = add.fieldNames.init
+                if (parent.nonEmpty) {
+                  findField("add to", parent)
+                }
+              case update: UpdateColumnType =>
+                val field = findField("update", update.fieldNames)
+                val fieldName = update.fieldNames.quoted
+                update.newDataType match {
+                  case _: StructType =>
+                    throw new AnalysisException(
+                      s"Cannot update ${table.name} field $fieldName type: " +
+                          s"update a struct by adding, deleting, or updating its fields")
+                  case _: MapType =>
+                    throw new AnalysisException(
+                      s"Cannot update ${table.name} field $fieldName type: " +
+                          s"update a map by updating $fieldName.key or $fieldName.value")
+                  case _: ArrayType =>
+                    throw new AnalysisException(
+                      s"Cannot update ${table.name} field $fieldName type: " +
+                          s"update the element by updating $fieldName.element")
+                  case updateType: AtomicType =>
+                    field.dataType match {
+                      case currentType: AtomicType if Cast.canSafeCast(currentType, updateType) =>
+                      // update is okay
+                      case currentType =>
+                        throw new AnalysisException(
+                          s"Cannot update ${table.name} field $fieldName: " +
+                              s"${currentType.simpleString} cannot be cast to " +
+                              s"${updateType.simpleString}")
+                    }
+                }
+              case rename: RenameColumn =>
+                findField("rename", rename.fieldNames)
+              case update: UpdateColumnComment =>
+                findField("update", update.fieldNames)
+              case delete: DeleteColumn =>
+                findField("delete", delete.fieldNames)
+              case _ =>
+              // no validation needed for set and remove property
             }
 
           case _ => // Fallbacks to the following checks
