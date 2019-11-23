@@ -31,12 +31,13 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis._
-import org.apache.spark.sql.catalyst.catalog.CatalogStorageFormat
+import org.apache.spark.sql.catalyst.catalog.{BucketSpec, CatalogStorageFormat}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{First, Last}
 import org.apache.spark.sql.catalyst.parser.SqlBaseParser._
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.connector.expressions.{ApplyTransform, BucketTransform, DaysTransform, Expression => V2Expression, FieldReference, HoursTransform, IdentityTransform, LiteralValue, MonthsTransform, Transform, YearsTransform}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.CalendarInterval
@@ -185,9 +186,9 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
 
   /**
    * Parameters used for writing query to a table:
-   *   (tableIdentifier, partitionKeys, exists).
+   *   (multipartIdentifier, partitionKeys, ifPartitionNotExists).
    */
-  type InsertTableParams = (TableIdentifier, Map[String, Option[String]], Boolean)
+  type InsertTableParams = (Seq[String], Map[String, Option[String]], Boolean)
 
   /**
    * Parameters used for writing query to a directory: (isLocal, CatalogStorageFormat, provider).
@@ -209,11 +210,21 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
       query: LogicalPlan): LogicalPlan = withOrigin(ctx) {
     ctx match {
       case table: InsertIntoTableContext =>
-        val (tableIdent, partitionKeys, exists) = visitInsertIntoTable(table)
-        InsertIntoTable(UnresolvedRelation(tableIdent), partitionKeys, query, false, exists)
+        val (tableIdent, partition, ifPartitionNotExists) = visitInsertIntoTable(table)
+        InsertIntoStatement(
+          UnresolvedRelation(tableIdent),
+          partition,
+          query,
+          overwrite = false,
+          ifPartitionNotExists)
       case table: InsertOverwriteTableContext =>
-        val (tableIdent, partitionKeys, exists) = visitInsertOverwriteTable(table)
-        InsertIntoTable(UnresolvedRelation(tableIdent), partitionKeys, query, true, exists)
+        val (tableIdent, partition, ifPartitionNotExists) = visitInsertOverwriteTable(table)
+        InsertIntoStatement(
+          UnresolvedRelation(tableIdent),
+          partition,
+          query,
+          overwrite = true,
+          ifPartitionNotExists)
       case dir: InsertOverwriteDirContext =>
         val (isLocal, storage, provider) = visitInsertOverwriteDir(dir)
         InsertIntoDir(isLocal, storage, provider, query, overwrite = true)
@@ -230,8 +241,12 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
    */
   override def visitInsertIntoTable(
       ctx: InsertIntoTableContext): InsertTableParams = withOrigin(ctx) {
-    val tableIdent = visitTableIdentifier(ctx.tableIdentifier)
+    val tableIdent = visitMultipartIdentifier(ctx.multipartIdentifier)
     val partitionKeys = Option(ctx.partitionSpec).map(visitPartitionSpec).getOrElse(Map.empty)
+
+    if (ctx.EXISTS != null) {
+      operationNotAllowed("INSERT INTO ... IF NOT EXISTS", ctx)
+    }
 
     (tableIdent, partitionKeys, false)
   }
@@ -242,13 +257,13 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
   override def visitInsertOverwriteTable(
       ctx: InsertOverwriteTableContext): InsertTableParams = withOrigin(ctx) {
     assert(ctx.OVERWRITE() != null)
-    val tableIdent = visitTableIdentifier(ctx.tableIdentifier)
+    val tableIdent = visitMultipartIdentifier(ctx.multipartIdentifier)
     val partitionKeys = Option(ctx.partitionSpec).map(visitPartitionSpec).getOrElse(Map.empty)
 
     val dynamicPartitionKeys: Map[String, Option[String]] = partitionKeys.filter(_._2.isEmpty)
     if (ctx.EXISTS != null && dynamicPartitionKeys.nonEmpty) {
-      throw new ParseException(s"Dynamic partitions do not support IF NOT EXISTS. Specified " +
-        "partitions with value: " + dynamicPartitionKeys.keys.mkString("[", ",", "]"), ctx)
+      operationNotAllowed("IF NOT EXISTS with dynamic partitions: " +
+        dynamicPartitionKeys.keys.mkString(", "), ctx)
     }
 
     (tableIdent, partitionKeys, ctx.EXISTS() != null)
@@ -268,6 +283,28 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
   override def visitInsertOverwriteHiveDir(
       ctx: InsertOverwriteHiveDirContext): InsertDirParams = withOrigin(ctx) {
     throw new ParseException("INSERT OVERWRITE DIRECTORY is not supported", ctx)
+  }
+
+  private def getTableAliasWithoutColumnAlias(
+      ctx: TableAliasContext, op: String): Option[String] = {
+    if (ctx == null) {
+      None
+    } else {
+      val ident = ctx.strictIdentifier()
+      if (ctx.identifierList() != null) {
+        throw new ParseException(s"Columns aliases are not allowed in $op.", ctx.identifierList())
+      }
+      if (ident != null) Some(ident.getText) else None
+    }
+  }
+
+  override def visitDeleteFromTable(
+      ctx: DeleteFromTableContext): LogicalPlan = withOrigin(ctx) {
+    val table = UnresolvedRelation(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tableAlias = getTableAliasWithoutColumnAlias(ctx.tableAlias(), "DELETE")
+    val aliasedTable = tableAlias.map(SubqueryAlias(_, table)).getOrElse(table)
+    val predicate = Option(ctx.booleanExpression()).map(expression)
+    DeleteFromTable(aliasedTable, predicate)
   }
 
   /**
@@ -810,14 +847,14 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
    * }}}
    */
   override def visitTable(ctx: TableContext): LogicalPlan = withOrigin(ctx) {
-    UnresolvedRelation(visitTableIdentifier(ctx.tableIdentifier))
+    UnresolvedRelation(visitMultipartIdentifier(ctx.multipartIdentifier))
   }
 
   /**
    * Create an aliased table reference. This is typically used in FROM clauses.
    */
   override def visitTableName(ctx: TableNameContext): LogicalPlan = withOrigin(ctx) {
-    val tableId = visitTableIdentifier(ctx.tableIdentifier)
+    val tableId = visitMultipartIdentifier(ctx.multipartIdentifier)
     val table = mayApplyAliasPlan(ctx.tableAlias, UnresolvedRelation(tableId))
     table.optionalMap(ctx.sample)(withSample)
   }
@@ -1334,13 +1371,29 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
   }
 
   /**
+   * Create a function database (optional) and name pair, for multipartIdentifier.
+   * This is used in CREATE FUNCTION, DROP FUNCTION, SHOWFUNCTIONS.
+   */
+  protected def visitFunctionName(ctx: MultipartIdentifierContext): FunctionIdentifier = {
+    visitFunctionName(ctx, ctx.parts.asScala.map(_.getText))
+  }
+
+  /**
    * Create a function database (optional) and name pair.
    */
   protected def visitFunctionName(ctx: QualifiedNameContext): FunctionIdentifier = {
-    ctx.identifier().asScala.map(_.getText) match {
+    visitFunctionName(ctx, ctx.identifier().asScala.map(_.getText))
+  }
+
+  /**
+   * Create a function database (optional) and name pair.
+   */
+  private def visitFunctionName(ctx: ParserRuleContext, texts: Seq[String]): FunctionIdentifier = {
+    texts match {
       case Seq(db, fn) => FunctionIdentifier(fn, Option(db))
       case Seq(fn) => FunctionIdentifier(fn, None)
-      case other => throw new ParseException(s"Unsupported function name '${ctx.getText}'", ctx)
+      case other =>
+        throw new ParseException(s"Unsupported function name '${texts.mkString(".")}'", ctx)
     }
   }
 
@@ -1861,5 +1914,1038 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
     import ctx._
     val structField = StructField(identifier.getText, typedVisit(dataType), nullable = true)
     if (STRING == null) structField else structField.withComment(string(STRING))
+  }
+
+  /**
+   * Create location string.
+   */
+  override def visitLocationSpec(ctx: LocationSpecContext): String = withOrigin(ctx) {
+    string(ctx.STRING)
+  }
+
+  /**
+   * Create a [[BucketSpec]].
+   */
+  override def visitBucketSpec(ctx: BucketSpecContext): BucketSpec = withOrigin(ctx) {
+    BucketSpec(
+      ctx.INTEGER_VALUE.getText.toInt,
+      visitIdentifierList(ctx.identifierList),
+      Option(ctx.orderedIdentifierList)
+          .toSeq
+          .flatMap(_.orderedIdentifier.asScala)
+          .map { orderedIdCtx =>
+            Option(orderedIdCtx.ordering).map(_.getText).foreach { dir =>
+              if (dir.toLowerCase(Locale.ROOT) != "asc") {
+                operationNotAllowed(s"Column ordering must be ASC, was '$dir'", ctx)
+              }
+            }
+
+            orderedIdCtx.identifier.getText
+          })
+  }
+
+  /**
+   * Convert a table property list into a key-value map.
+   * This should be called through [[visitPropertyKeyValues]] or [[visitPropertyKeys]].
+   */
+  override def visitTablePropertyList(
+      ctx: TablePropertyListContext): Map[String, String] = withOrigin(ctx) {
+    val properties = ctx.tableProperty.asScala.map { property =>
+      val key = visitTablePropertyKey(property.key)
+      val value = visitTablePropertyValue(property.value)
+      key -> value
+    }
+    // Check for duplicate property names.
+    checkDuplicateKeys(properties, ctx)
+    properties.toMap
+  }
+
+  /**
+   * Parse a key-value map from a [[TablePropertyListContext]], assuming all values are specified.
+   */
+  def visitPropertyKeyValues(ctx: TablePropertyListContext): Map[String, String] = {
+    val props = visitTablePropertyList(ctx)
+    val badKeys = props.collect { case (key, null) => key }
+    if (badKeys.nonEmpty) {
+      operationNotAllowed(
+        s"Values must be specified for key(s): ${badKeys.mkString("[", ",", "]")}", ctx)
+    }
+    props
+  }
+
+  /**
+   * Parse a list of keys from a [[TablePropertyListContext]], assuming no values are specified.
+   */
+  def visitPropertyKeys(ctx: TablePropertyListContext): Seq[String] = {
+    val props = visitTablePropertyList(ctx)
+    val badKeys = props.filter { case (_, v) => v != null }.keys
+    if (badKeys.nonEmpty) {
+      operationNotAllowed(
+        s"Values should not be specified for key(s): ${badKeys.mkString("[", ",", "]")}", ctx)
+    }
+    props.keys.toSeq
+  }
+
+  /**
+   * A table property key can either be String or a collection of dot separated elements. This
+   * function extracts the property key based on whether its a string literal or a table property
+   * identifier.
+   */
+  override def visitTablePropertyKey(key: TablePropertyKeyContext): String = {
+    if (key.STRING != null) {
+      string(key.STRING)
+    } else {
+      key.getText
+    }
+  }
+
+  /**
+   * A table property value can be String, Integer, Boolean or Decimal. This function extracts
+   * the property value based on whether its a string, integer, boolean or decimal literal.
+   */
+  override def visitTablePropertyValue(value: TablePropertyValueContext): String = {
+    if (value == null) {
+      null
+    } else if (value.STRING != null) {
+      string(value.STRING)
+    } else if (value.booleanValue != null) {
+      value.getText.toLowerCase(Locale.ROOT)
+    } else {
+      value.getText
+    }
+  }
+
+  /**
+   * Type to keep track of a table header: (identifier, isTemporary, ifNotExists, isExternal).
+   */
+  type TableHeader = (Seq[String], Boolean, Boolean, Boolean)
+
+  /**
+   * Validate a create table statement and return the [[TableIdentifier]].
+   */
+  override def visitCreateTableHeader(
+      ctx: CreateTableHeaderContext): TableHeader = withOrigin(ctx) {
+    val temporary = ctx.TEMPORARY != null
+    val ifNotExists = ctx.EXISTS != null
+    if (temporary && ifNotExists) {
+      operationNotAllowed("CREATE TEMPORARY TABLE ... IF NOT EXISTS", ctx)
+    }
+    val multipartIdentifier = ctx.multipartIdentifier.parts.asScala.map(_.getText)
+    (multipartIdentifier, temporary, ifNotExists, ctx.EXTERNAL != null)
+  }
+
+  /**
+   * Validate a replace table statement and return the [[TableIdentifier]].
+   */
+  override def visitReplaceTableHeader(
+      ctx: ReplaceTableHeaderContext): TableHeader = withOrigin(ctx) {
+    val multipartIdentifier = ctx.multipartIdentifier.parts.asScala.map(_.getText)
+    (multipartIdentifier, false, false, false)
+  }
+
+  /**
+   * Parse a qualified name to a multipart name.
+   */
+  override def visitQualifiedName(ctx: QualifiedNameContext): Seq[String] = withOrigin(ctx) {
+    ctx.identifier.asScala.map(_.getText)
+  }
+
+  /**
+   * Parse a list of transforms.
+   */
+  override def visitTransformList(ctx: TransformListContext): Seq[Transform] = withOrigin(ctx) {
+    def getFieldReference(
+        ctx: ApplyTransformContext,
+        arg: V2Expression): FieldReference = {
+      lazy val name: String = ctx.identifier.getText
+      arg match {
+        case ref: FieldReference =>
+          ref
+        case nonRef =>
+          throw new ParseException(
+            s"Expected a column reference for transform $name: ${nonRef.describe}", ctx)
+      }
+    }
+
+    def getSingleFieldReference(
+        ctx: ApplyTransformContext,
+        arguments: Seq[V2Expression]): FieldReference = {
+      lazy val name: String = ctx.identifier.getText
+      if (arguments.size > 1) {
+        throw new ParseException(s"Too many arguments for transform $name", ctx)
+      } else if (arguments.isEmpty) {
+        throw new ParseException(s"Not enough arguments for transform $name", ctx)
+      } else {
+        getFieldReference(ctx, arguments.head)
+      }
+    }
+
+    ctx.transforms.asScala.map {
+      case identityCtx: IdentityTransformContext =>
+        IdentityTransform(FieldReference(typedVisit[Seq[String]](identityCtx.qualifiedName)))
+
+      case applyCtx: ApplyTransformContext =>
+        val arguments = applyCtx.argument.asScala.map(visitTransformArgument)
+
+        applyCtx.identifier.getText match {
+          case "bucket" =>
+            val numBuckets: Int = arguments.head match {
+              case LiteralValue(shortValue, ShortType) =>
+                shortValue.asInstanceOf[Short].toInt
+              case LiteralValue(intValue, IntegerType) =>
+                intValue.asInstanceOf[Int]
+              case LiteralValue(longValue, LongType) =>
+                longValue.asInstanceOf[Long].toInt
+              case lit =>
+                throw new ParseException(s"Invalid number of buckets: ${lit.describe}", applyCtx)
+            }
+
+            val fields = arguments.tail.map(arg => getFieldReference(applyCtx, arg))
+
+            BucketTransform(LiteralValue(numBuckets, IntegerType), fields)
+
+          case "years" =>
+            YearsTransform(getSingleFieldReference(applyCtx, arguments))
+
+          case "months" =>
+            MonthsTransform(getSingleFieldReference(applyCtx, arguments))
+
+          case "days" =>
+            DaysTransform(getSingleFieldReference(applyCtx, arguments))
+
+          case "hours" =>
+            HoursTransform(getSingleFieldReference(applyCtx, arguments))
+
+          case name =>
+            ApplyTransform(name, arguments)
+        }
+    }
+  }
+
+  /**
+   * Parse an argument to a transform. An argument may be a field reference (qualified name) or
+   * a value literal.
+   */
+  override def visitTransformArgument(ctx: TransformArgumentContext): V2Expression = {
+    withOrigin(ctx) {
+      val reference = Option(ctx.qualifiedName)
+          .map(typedVisit[Seq[String]])
+          .map(FieldReference(_))
+      val literal = Option(ctx.constant)
+          .map(typedVisit[Literal])
+          .map(lit => LiteralValue(lit.value, lit.dataType))
+      reference.orElse(literal)
+          .getOrElse(throw new ParseException(s"Invalid transform argument", ctx))
+    }
+  }
+
+  /**
+   * Create a [[CreateNamespaceStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   CREATE NAMESPACE [IF NOT EXISTS] ns1.ns2.ns3
+   *     create_namespace_clauses;
+   *
+   *   create_namespace_clauses (order insensitive):
+   *     [COMMENT namespace_comment]
+   *     [LOCATION path]
+   *     [WITH PROPERTIES (key1=val1, key2=val2, ...)]
+   * }}}
+   */
+  override def visitCreateNamespace(ctx: CreateNamespaceContext): LogicalPlan = withOrigin(ctx) {
+    checkDuplicateClauses(ctx.COMMENT, "COMMENT", ctx)
+    checkDuplicateClauses(ctx.locationSpec, "LOCATION", ctx)
+    checkDuplicateClauses(ctx.PROPERTIES, "WITH PROPERTIES", ctx)
+    checkDuplicateClauses(ctx.DBPROPERTIES, "WITH DBPROPERTIES", ctx)
+
+    if (!ctx.PROPERTIES.isEmpty && !ctx.DBPROPERTIES.isEmpty) {
+      throw new ParseException(s"Either PROPERTIES or DBPROPERTIES is allowed.", ctx)
+    }
+
+    var properties = ctx.tablePropertyList.asScala.headOption
+      .map(visitPropertyKeyValues)
+      .getOrElse(Map.empty)
+    Option(ctx.comment).map(string).map {
+      properties += CreateNamespaceStatement.COMMENT_PROPERTY_KEY -> _
+    }
+    ctx.locationSpec.asScala.headOption.map(visitLocationSpec).map {
+      properties += CreateNamespaceStatement.LOCATION_PROPERTY_KEY -> _
+    }
+
+    CreateNamespaceStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      ctx.EXISTS != null,
+      properties)
+  }
+
+  /**
+   * Create a [[DropNamespaceStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   DROP (DATABASE|SCHEMA|NAMESPACE) [IF EXISTS] ns1.ns2 [RESTRICT|CASCADE];
+   * }}}
+   */
+  override def visitDropNamespace(ctx: DropNamespaceContext): LogicalPlan = withOrigin(ctx) {
+    DropNamespaceStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      ctx.EXISTS != null,
+      ctx.CASCADE != null)
+  }
+
+  /**
+   * Create an [[AlterNamespaceSetPropertiesStatement]] logical plan.
+   *
+   * For example:
+   * {{{
+   *   ALTER (DATABASE|SCHEMA|NAMESPACE) database
+   *   SET (DBPROPERTIES|PROPERTIES) (property_name=property_value, ...);
+   * }}}
+   */
+  override def visitSetNamespaceProperties(ctx: SetNamespacePropertiesContext): LogicalPlan = {
+    withOrigin(ctx) {
+      AlterNamespaceSetPropertiesStatement(
+        visitMultipartIdentifier(ctx.multipartIdentifier),
+        visitPropertyKeyValues(ctx.tablePropertyList))
+    }
+  }
+
+  /**
+   * Create an [[AlterNamespaceSetLocationStatement]] logical plan.
+   *
+   * For example:
+   * {{{
+   *   ALTER (DATABASE|SCHEMA|NAMESPACE) namespace SET LOCATION path;
+   * }}}
+   */
+  override def visitSetNamespaceLocation(ctx: SetNamespaceLocationContext): LogicalPlan = {
+    withOrigin(ctx) {
+      AlterNamespaceSetLocationStatement(
+        visitMultipartIdentifier(ctx.multipartIdentifier),
+        visitLocationSpec(ctx.locationSpec))
+    }
+  }
+
+  /**
+   * Create a [[ShowNamespacesStatement]] command.
+   */
+  override def visitShowNamespaces(ctx: ShowNamespacesContext): LogicalPlan = withOrigin(ctx) {
+    if (ctx.DATABASES != null && ctx.multipartIdentifier != null) {
+      throw new ParseException(s"FROM/IN operator is not allowed in SHOW DATABASES", ctx)
+    }
+
+    ShowNamespacesStatement(
+      Option(ctx.multipartIdentifier).map(visitMultipartIdentifier),
+      Option(ctx.pattern).map(string))
+  }
+
+  /**
+   * Create a [[DescribeNamespaceStatement]].
+   *
+   * For example:
+   * {{{
+   *   DESCRIBE (DATABASE|SCHEMA|NAMESPACE) [EXTENDED] database;
+   * }}}
+   */
+  override def visitDescribeNamespace(ctx: DescribeNamespaceContext): LogicalPlan =
+    withOrigin(ctx) {
+      DescribeNamespaceStatement(
+        visitMultipartIdentifier(ctx.multipartIdentifier()),
+        ctx.EXTENDED != null)
+    }
+
+  /**
+   * Create a table, returning a [[CreateTableStatement]] logical plan.
+   *
+   * Expected format:
+   * {{{
+   *   CREATE [TEMPORARY] TABLE [IF NOT EXISTS] [db_name.]table_name
+   *   USING table_provider
+   *   create_table_clauses
+   *   [[AS] select_statement];
+   *
+   *   create_table_clauses (order insensitive):
+   *     [OPTIONS table_property_list]
+   *     [PARTITIONED BY (col_name, transform(col_name), transform(constant, col_name), ...)]
+   *     [CLUSTERED BY (col_name, col_name, ...)
+   *       [SORTED BY (col_name [ASC|DESC], ...)]
+   *       INTO num_buckets BUCKETS
+   *     ]
+   *     [LOCATION path]
+   *     [COMMENT table_comment]
+   *     [TBLPROPERTIES (property_name=property_value, ...)]
+   * }}}
+   */
+  override def visitCreateTable(ctx: CreateTableContext): LogicalPlan = withOrigin(ctx) {
+    val (table, temp, ifNotExists, external) = visitCreateTableHeader(ctx.createTableHeader)
+    if (external) {
+      operationNotAllowed("CREATE EXTERNAL TABLE ... USING", ctx)
+    }
+
+    checkDuplicateClauses(ctx.TBLPROPERTIES, "TBLPROPERTIES", ctx)
+    checkDuplicateClauses(ctx.OPTIONS, "OPTIONS", ctx)
+    checkDuplicateClauses(ctx.PARTITIONED, "PARTITIONED BY", ctx)
+    checkDuplicateClauses(ctx.COMMENT, "COMMENT", ctx)
+    checkDuplicateClauses(ctx.bucketSpec(), "CLUSTERED BY", ctx)
+    checkDuplicateClauses(ctx.locationSpec, "LOCATION", ctx)
+
+    val schema = Option(ctx.colTypeList()).map(createSchema)
+    val partitioning: Seq[Transform] =
+      Option(ctx.partitioning).map(visitTransformList).getOrElse(Nil)
+    val bucketSpec = ctx.bucketSpec().asScala.headOption.map(visitBucketSpec)
+    val properties = Option(ctx.tableProps).map(visitPropertyKeyValues).getOrElse(Map.empty)
+    val options = Option(ctx.options).map(visitPropertyKeyValues).getOrElse(Map.empty)
+
+    val provider = ctx.tableProvider.multipartIdentifier.getText
+    val location = ctx.locationSpec.asScala.headOption.map(visitLocationSpec)
+    val comment = Option(ctx.comment).map(string)
+
+    Option(ctx.query).map(plan) match {
+      case Some(_) if temp =>
+        operationNotAllowed("CREATE TEMPORARY TABLE ... USING ... AS query", ctx)
+
+      case Some(_) if schema.isDefined =>
+        operationNotAllowed(
+          "Schema may not be specified in a Create Table As Select (CTAS) statement",
+          ctx)
+
+      case Some(query) =>
+        CreateTableAsSelectStatement(
+          table, query, partitioning, bucketSpec, properties, provider, options, location, comment,
+          ifNotExists = ifNotExists)
+
+      case None if temp =>
+        // CREATE TEMPORARY TABLE ... USING ... is not supported by the catalyst parser.
+        // Use CREATE TEMPORARY VIEW ... USING ... instead.
+        operationNotAllowed("CREATE TEMPORARY TABLE IF NOT EXISTS", ctx)
+
+      case _ =>
+        CreateTableStatement(table, schema.getOrElse(new StructType), partitioning, bucketSpec,
+          properties, provider, options, location, comment, ifNotExists = ifNotExists)
+    }
+  }
+
+  /**
+   * Replace a table, returning a [[ReplaceTableStatement]] logical plan.
+   *
+   * Expected format:
+   * {{{
+   *   [CREATE OR] REPLACE TABLE [db_name.]table_name
+   *   USING table_provider
+   *   replace_table_clauses
+   *   [[AS] select_statement];
+   *
+   *   replace_table_clauses (order insensitive):
+   *     [OPTIONS table_property_list]
+   *     [PARTITIONED BY (col_name, transform(col_name), transform(constant, col_name), ...)]
+   *     [CLUSTERED BY (col_name, col_name, ...)
+   *       [SORTED BY (col_name [ASC|DESC], ...)]
+   *       INTO num_buckets BUCKETS
+   *     ]
+   *     [LOCATION path]
+   *     [COMMENT table_comment]
+   *     [TBLPROPERTIES (property_name=property_value, ...)]
+   * }}}
+   */
+  override def visitReplaceTable(ctx: ReplaceTableContext): LogicalPlan = withOrigin(ctx) {
+    val (table, _, ifNotExists, external) = visitReplaceTableHeader(ctx.replaceTableHeader)
+    if (external) {
+      operationNotAllowed("REPLACE EXTERNAL TABLE ... USING", ctx)
+    }
+
+    checkDuplicateClauses(ctx.TBLPROPERTIES, "TBLPROPERTIES", ctx)
+    checkDuplicateClauses(ctx.OPTIONS, "OPTIONS", ctx)
+    checkDuplicateClauses(ctx.PARTITIONED, "PARTITIONED BY", ctx)
+    checkDuplicateClauses(ctx.COMMENT, "COMMENT", ctx)
+    checkDuplicateClauses(ctx.bucketSpec(), "CLUSTERED BY", ctx)
+    checkDuplicateClauses(ctx.locationSpec, "LOCATION", ctx)
+
+    val schema = Option(ctx.colTypeList()).map(createSchema)
+    val partitioning: Seq[Transform] =
+      Option(ctx.partitioning).map(visitTransformList).getOrElse(Nil)
+    val bucketSpec = ctx.bucketSpec().asScala.headOption.map(visitBucketSpec)
+    val properties = Option(ctx.tableProps).map(visitPropertyKeyValues).getOrElse(Map.empty)
+    val options = Option(ctx.options).map(visitPropertyKeyValues).getOrElse(Map.empty)
+
+    val provider = ctx.tableProvider.multipartIdentifier.getText
+    val location = ctx.locationSpec.asScala.headOption.map(visitLocationSpec)
+    val comment = Option(ctx.comment).map(string)
+    val orCreate = ctx.replaceTableHeader().CREATE() != null
+
+    Option(ctx.query).map(plan) match {
+      case Some(_) if schema.isDefined =>
+        operationNotAllowed(
+          "Schema may not be specified in a Replace Table As Select (RTAS) statement",
+          ctx)
+
+      case Some(query) =>
+        ReplaceTableAsSelectStatement(table, query, partitioning, bucketSpec, properties,
+          provider, options, location, comment, orCreate = orCreate)
+
+      case _ =>
+        ReplaceTableStatement(table, schema.getOrElse(new StructType), partitioning,
+          bucketSpec, properties, provider, options, location, comment, orCreate = orCreate)
+    }
+  }
+
+  /**
+   * Create a [[DropTableStatement]] command.
+   */
+  override def visitDropTable(ctx: DropTableContext): LogicalPlan = withOrigin(ctx) {
+    DropTableStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier()),
+      ctx.EXISTS != null,
+      ctx.PURGE != null)
+  }
+
+  /**
+   * Create a [[DropViewStatement]] command.
+   */
+  override def visitDropView(ctx: DropViewContext): AnyRef = withOrigin(ctx) {
+    DropViewStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier()),
+      ctx.EXISTS != null)
+  }
+
+  /**
+   * Create a [[UseStatement]] logical plan.
+   */
+  override def visitUse(ctx: UseContext): LogicalPlan = withOrigin(ctx) {
+    val nameParts = visitMultipartIdentifier(ctx.multipartIdentifier)
+    UseStatement(ctx.NAMESPACE != null, nameParts)
+  }
+
+  /**
+   * Create a [[ShowCurrentNamespaceStatement]].
+   */
+  override def visitShowCurrentNamespace(
+      ctx: ShowCurrentNamespaceContext) : LogicalPlan = withOrigin(ctx) {
+    ShowCurrentNamespaceStatement()
+  }
+
+  /**
+   * Create a [[ShowTablesStatement]] command.
+   */
+  override def visitShowTables(ctx: ShowTablesContext): LogicalPlan = withOrigin(ctx) {
+    ShowTablesStatement(
+      Option(ctx.multipartIdentifier).map(visitMultipartIdentifier),
+      Option(ctx.pattern).map(string))
+  }
+
+  /**
+   * Create a [[ShowTableStatement]] command.
+   */
+  override def visitShowTable(ctx: ShowTableContext): LogicalPlan = withOrigin(ctx) {
+    ShowTableStatement(
+      Option(ctx.namespace).map(visitMultipartIdentifier),
+      string(ctx.pattern),
+      Option(ctx.partitionSpec).map(visitNonOptionalPartitionSpec))
+  }
+
+  /**
+   * Parse new column info from ADD COLUMN into a QualifiedColType.
+   */
+  override def visitQualifiedColTypeWithPosition(
+      ctx: QualifiedColTypeWithPositionContext): QualifiedColType = withOrigin(ctx) {
+    if (ctx.colPosition != null) {
+      operationNotAllowed("ALTER TABLE table ADD COLUMN ... FIRST | AFTER otherCol", ctx)
+    }
+
+    QualifiedColType(
+      typedVisit[Seq[String]](ctx.name),
+      typedVisit[DataType](ctx.dataType),
+      Option(ctx.comment).map(string))
+  }
+
+  /**
+   * Parse a [[AlterTableAddColumnsStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table1
+   *   ADD COLUMNS (col_name data_type [COMMENT col_comment], ...);
+   * }}}
+   */
+  override def visitAddTableColumns(ctx: AddTableColumnsContext): LogicalPlan = withOrigin(ctx) {
+    AlterTableAddColumnsStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      ctx.columns.qualifiedColTypeWithPosition.asScala.map(typedVisit[QualifiedColType])
+    )
+  }
+
+  /**
+   * Parse a [[AlterTableRenameColumnStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table1 RENAME COLUMN a.b.c TO x
+   * }}}
+   */
+  override def visitRenameTableColumn(
+      ctx: RenameTableColumnContext): LogicalPlan = withOrigin(ctx) {
+    AlterTableRenameColumnStatement(
+      visitMultipartIdentifier(ctx.table),
+      ctx.from.parts.asScala.map(_.getText),
+      ctx.to.getText)
+  }
+
+  /**
+   * Parse a [[AlterTableAlterColumnStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table1 ALTER COLUMN a.b.c TYPE bigint
+   *   ALTER TABLE table1 ALTER COLUMN a.b.c TYPE bigint COMMENT 'new comment'
+   *   ALTER TABLE table1 ALTER COLUMN a.b.c COMMENT 'new comment'
+   * }}}
+   */
+  override def visitAlterTableColumn(
+      ctx: AlterTableColumnContext): LogicalPlan = withOrigin(ctx) {
+    val verb = if (ctx.CHANGE != null) "CHANGE" else "ALTER"
+    if (ctx.colPosition != null) {
+      operationNotAllowed(s"ALTER TABLE table $verb COLUMN ... FIRST | AFTER otherCol", ctx)
+    }
+
+    if (ctx.dataType == null && ctx.comment == null) {
+      operationNotAllowed(s"ALTER TABLE table $verb COLUMN requires a TYPE or a COMMENT", ctx)
+    }
+
+    AlterTableAlterColumnStatement(
+      visitMultipartIdentifier(ctx.table),
+      typedVisit[Seq[String]](ctx.column),
+      Option(ctx.dataType).map(typedVisit[DataType]),
+      Option(ctx.comment).map(string))
+  }
+
+  /**
+   * Parse a [[AlterTableDropColumnsStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table1 DROP COLUMN a.b.c
+   *   ALTER TABLE table1 DROP COLUMNS a.b.c, x, y
+   * }}}
+   */
+  override def visitDropTableColumns(
+      ctx: DropTableColumnsContext): LogicalPlan = withOrigin(ctx) {
+    val columnsToDrop = ctx.columns.multipartIdentifier.asScala.map(typedVisit[Seq[String]])
+    AlterTableDropColumnsStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      columnsToDrop)
+  }
+
+  /**
+   * Parse [[AlterViewSetPropertiesStatement]] or [[AlterTableSetPropertiesStatement]] commands.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table SET TBLPROPERTIES ('comment' = new_comment);
+   *   ALTER VIEW view SET TBLPROPERTIES ('comment' = new_comment);
+   * }}}
+   */
+  override def visitSetTableProperties(
+      ctx: SetTablePropertiesContext): LogicalPlan = withOrigin(ctx) {
+    val identifier = visitMultipartIdentifier(ctx.multipartIdentifier)
+    val properties = visitPropertyKeyValues(ctx.tablePropertyList)
+    if (ctx.VIEW != null) {
+      AlterViewSetPropertiesStatement(identifier, properties)
+    } else {
+      AlterTableSetPropertiesStatement(identifier, properties)
+    }
+  }
+
+  /**
+   * Parse [[AlterViewUnsetPropertiesStatement]] or [[AlterTableUnsetPropertiesStatement]] commands.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table UNSET TBLPROPERTIES [IF EXISTS] ('comment', 'key');
+   *   ALTER VIEW view UNSET TBLPROPERTIES [IF EXISTS] ('comment', 'key');
+   * }}}
+   */
+  override def visitUnsetTableProperties(
+      ctx: UnsetTablePropertiesContext): LogicalPlan = withOrigin(ctx) {
+    val identifier = visitMultipartIdentifier(ctx.multipartIdentifier)
+    val properties = visitPropertyKeys(ctx.tablePropertyList)
+    val ifExists = ctx.EXISTS != null
+    if (ctx.VIEW != null) {
+      AlterViewUnsetPropertiesStatement(identifier, properties, ifExists)
+    } else {
+      AlterTableUnsetPropertiesStatement(identifier, properties, ifExists)
+    }
+  }
+
+  /**
+   * Create an [[AlterTableSetLocationStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table SET LOCATION "loc";
+   * }}}
+   */
+  override def visitSetTableLocation(ctx: SetTableLocationContext): LogicalPlan = withOrigin(ctx) {
+    AlterTableSetLocationStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      Option(ctx.partitionSpec).map(visitNonOptionalPartitionSpec),
+      visitLocationSpec(ctx.locationSpec))
+  }
+
+  /**
+   * Create a [[DescribeColumnStatement]] or [[DescribeTableStatement]] commands.
+   */
+  override def visitDescribeTable(ctx: DescribeTableContext): LogicalPlan = withOrigin(ctx) {
+    val isExtended = ctx.EXTENDED != null || ctx.FORMATTED != null
+    if (ctx.describeColName != null) {
+      if (ctx.partitionSpec != null) {
+        throw new ParseException("DESC TABLE COLUMN for a specific partition is not supported", ctx)
+      } else {
+        DescribeColumnStatement(
+          visitMultipartIdentifier(ctx.multipartIdentifier()),
+          ctx.describeColName.nameParts.asScala.map(_.getText),
+          isExtended)
+      }
+    } else {
+      val partitionSpec = if (ctx.partitionSpec != null) {
+        // According to the syntax, visitPartitionSpec returns `Map[String, Option[String]]`.
+        visitPartitionSpec(ctx.partitionSpec).map {
+          case (key, Some(value)) => key -> value
+          case (key, _) =>
+            throw new ParseException(s"PARTITION specification is incomplete: `$key`", ctx)
+        }
+      } else {
+        Map.empty[String, String]
+      }
+      DescribeTableStatement(
+        visitMultipartIdentifier(ctx.multipartIdentifier()),
+        partitionSpec,
+        isExtended)
+    }
+  }
+
+  /**
+   * Create an [[AnalyzeTableStatement]], or an [[AnalyzeColumnStatement]].
+   * Example SQL for analyzing a table or a set of partitions :
+   * {{{
+   *   ANALYZE TABLE multi_part_name [PARTITION (partcol1[=val1], partcol2[=val2], ...)]
+   *   COMPUTE STATISTICS [NOSCAN];
+   * }}}
+   *
+   * Example SQL for analyzing columns :
+   * {{{
+   *   ANALYZE TABLE multi_part_name COMPUTE STATISTICS FOR COLUMNS column1, column2;
+   * }}}
+   *
+   * Example SQL for analyzing all columns of a table:
+   * {{{
+   *   ANALYZE TABLE multi_part_name COMPUTE STATISTICS FOR ALL COLUMNS;
+   * }}}
+   */
+  override def visitAnalyze(ctx: AnalyzeContext): LogicalPlan = withOrigin(ctx) {
+    def checkPartitionSpec(): Unit = {
+      if (ctx.partitionSpec != null) {
+        logWarning("Partition specification is ignored when collecting column statistics: " +
+          ctx.partitionSpec.getText)
+      }
+    }
+    if (ctx.identifier != null &&
+        ctx.identifier.getText.toLowerCase(Locale.ROOT) != "noscan") {
+      throw new ParseException(s"Expected `NOSCAN` instead of `${ctx.identifier.getText}`", ctx)
+    }
+
+    val tableName = visitMultipartIdentifier(ctx.multipartIdentifier())
+    if (ctx.ALL() != null) {
+      checkPartitionSpec()
+      AnalyzeColumnStatement(tableName, None, allColumns = true)
+    } else if (ctx.identifierSeq() == null) {
+      val partitionSpec = if (ctx.partitionSpec != null) {
+        visitPartitionSpec(ctx.partitionSpec)
+      } else {
+        Map.empty[String, Option[String]]
+      }
+      AnalyzeTableStatement(tableName, partitionSpec, noScan = ctx.identifier != null)
+    } else {
+      checkPartitionSpec()
+      AnalyzeColumnStatement(
+        tableName, Option(visitIdentifierSeq(ctx.identifierSeq())), allColumns = false)
+    }
+  }
+
+  /**
+   * Create a [[RepairTableStatement]].
+   *
+   * For example:
+   * {{{
+   *   MSCK REPAIR TABLE multi_part_name
+   * }}}
+   */
+  override def visitRepairTable(ctx: RepairTableContext): LogicalPlan = withOrigin(ctx) {
+    RepairTableStatement(visitMultipartIdentifier(ctx.multipartIdentifier()))
+  }
+
+  /**
+   * Create a [[LoadDataStatement]].
+   *
+   * For example:
+   * {{{
+   *   LOAD DATA [LOCAL] INPATH 'filepath' [OVERWRITE] INTO TABLE multi_part_name
+   *   [PARTITION (partcol1=val1, partcol2=val2 ...)]
+   * }}}
+   */
+  override def visitLoadData(ctx: LoadDataContext): LogicalPlan = withOrigin(ctx) {
+    LoadDataStatement(
+      tableName = visitMultipartIdentifier(ctx.multipartIdentifier),
+      path = string(ctx.path),
+      isLocal = ctx.LOCAL != null,
+      isOverwrite = ctx.OVERWRITE != null,
+      partition = Option(ctx.partitionSpec).map(visitNonOptionalPartitionSpec)
+    )
+  }
+
+  /**
+   * Creates a [[ShowCreateTableStatement]]
+   */
+  override def visitShowCreateTable(ctx: ShowCreateTableContext): LogicalPlan = withOrigin(ctx) {
+    ShowCreateTableStatement(visitMultipartIdentifier(ctx.multipartIdentifier()))
+  }
+
+  /**
+   * Create a [[CacheTableStatement]].
+   *
+   * For example:
+   * {{{
+   *   CACHE [LAZY] TABLE multi_part_name
+   *   [OPTIONS tablePropertyList] [[AS] query]
+   * }}}
+   */
+  override def visitCacheTable(ctx: CacheTableContext): LogicalPlan = withOrigin(ctx) {
+    import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
+
+    val query = Option(ctx.query).map(plan)
+    val tableName = visitMultipartIdentifier(ctx.multipartIdentifier)
+    if (query.isDefined && tableName.length > 1) {
+      val catalogAndNamespace = tableName.init
+      throw new ParseException("It is not allowed to add catalog/namespace " +
+        s"prefix ${catalogAndNamespace.quoted} to " +
+        "the table name in CACHE TABLE AS SELECT", ctx)
+    }
+    val options = Option(ctx.options).map(visitPropertyKeyValues).getOrElse(Map.empty)
+    CacheTableStatement(tableName, query, ctx.LAZY != null, options)
+  }
+
+  /**
+   * Create an [[UncacheTableStatement]] logical plan.
+   */
+  override def visitUncacheTable(ctx: UncacheTableContext): LogicalPlan = withOrigin(ctx) {
+    UncacheTableStatement(visitMultipartIdentifier(ctx.multipartIdentifier), ctx.EXISTS != null)
+  }
+
+  /**
+   * Create a [[TruncateTableStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   TRUNCATE TABLE multi_part_name [PARTITION (partcol1=val1, partcol2=val2 ...)]
+   * }}}
+   */
+  override def visitTruncateTable(ctx: TruncateTableContext): LogicalPlan = withOrigin(ctx) {
+    TruncateTableStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      Option(ctx.partitionSpec).map(visitNonOptionalPartitionSpec))
+  }
+
+  /**
+   * A command for users to list the partition names of a table. If partition spec is specified,
+   * partitions that match the spec are returned. Otherwise an empty result set is returned.
+   *
+   * This function creates a [[ShowPartitionsStatement]] logical plan
+   *
+   * The syntax of using this command in SQL is:
+   * {{{
+   *   SHOW PARTITIONS multi_part_name [partition_spec];
+   * }}}
+   */
+  override def visitShowPartitions(ctx: ShowPartitionsContext): LogicalPlan = withOrigin(ctx) {
+    val table = visitMultipartIdentifier(ctx.multipartIdentifier)
+    val partitionKeys = Option(ctx.partitionSpec).map(visitNonOptionalPartitionSpec)
+    ShowPartitionsStatement(table, partitionKeys)
+  }
+
+  /**
+   * Create a [[RefreshTableStatement]].
+   *
+   * For example:
+   * {{{
+   *   REFRESH TABLE multi_part_name
+   * }}}
+   */
+  override def visitRefreshTable(ctx: RefreshTableContext): LogicalPlan = withOrigin(ctx) {
+    RefreshTableStatement(visitMultipartIdentifier(ctx.multipartIdentifier()))
+  }
+
+  /**
+   * A command for users to list the column names for a table.
+   * This function creates a [[ShowColumnsStatement]] logical plan.
+   *
+   * The syntax of using this command in SQL is:
+   * {{{
+   *   SHOW COLUMNS (FROM | IN) tableName=multipartIdentifier
+   *        ((FROM | IN) namespace=multipartIdentifier)?
+   * }}}
+   */
+  override def visitShowColumns(ctx: ShowColumnsContext): LogicalPlan = withOrigin(ctx) {
+    val table = visitMultipartIdentifier(ctx.table)
+    val namespace = Option(ctx.namespace).map(visitMultipartIdentifier)
+    ShowColumnsStatement(table, namespace)
+  }
+
+  /**
+   * Create an [[AlterTableRecoverPartitionsStatement]]
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE multi_part_name RECOVER PARTITIONS;
+   * }}}
+   */
+  override def visitRecoverPartitions(
+      ctx: RecoverPartitionsContext): LogicalPlan = withOrigin(ctx) {
+    AlterTableRecoverPartitionsStatement(visitMultipartIdentifier(ctx.multipartIdentifier))
+  }
+
+  /**
+   * Create an [[AlterTableAddPartitionStatement]].
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE multi_part_name ADD [IF NOT EXISTS] PARTITION spec [LOCATION 'loc1']
+   *   ALTER VIEW multi_part_name ADD [IF NOT EXISTS] PARTITION spec
+   * }}}
+   *
+   * ALTER VIEW ... ADD PARTITION ... is not supported because the concept of partitioning
+   * is associated with physical tables
+   */
+  override def visitAddTablePartition(
+      ctx: AddTablePartitionContext): LogicalPlan = withOrigin(ctx) {
+    if (ctx.VIEW != null) {
+      operationNotAllowed("ALTER VIEW ... ADD PARTITION", ctx)
+    }
+    // Create partition spec to location mapping.
+    val specsAndLocs = ctx.partitionSpecLocation.asScala.map { splCtx =>
+      val spec = visitNonOptionalPartitionSpec(splCtx.partitionSpec)
+      val location = Option(splCtx.locationSpec).map(visitLocationSpec)
+      spec -> location
+    }
+    AlterTableAddPartitionStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      specsAndLocs,
+      ctx.EXISTS != null)
+  }
+
+  /**
+   * Create an [[AlterTableRenamePartitionStatement]]
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE multi_part_name PARTITION spec1 RENAME TO PARTITION spec2;
+   * }}}
+   */
+  override def visitRenameTablePartition(
+      ctx: RenameTablePartitionContext): LogicalPlan = withOrigin(ctx) {
+    AlterTableRenamePartitionStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      visitNonOptionalPartitionSpec(ctx.from),
+      visitNonOptionalPartitionSpec(ctx.to))
+  }
+
+  /**
+   * Create an [[AlterTableDropPartitionStatement]]
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE multi_part_name DROP [IF EXISTS] PARTITION spec1[, PARTITION spec2, ...]
+   *     [PURGE];
+   *   ALTER VIEW view DROP [IF EXISTS] PARTITION spec1[, PARTITION spec2, ...];
+   * }}}
+   *
+   * ALTER VIEW ... DROP PARTITION ... is not supported because the concept of partitioning
+   * is associated with physical tables
+   */
+  override def visitDropTablePartitions(
+      ctx: DropTablePartitionsContext): LogicalPlan = withOrigin(ctx) {
+    if (ctx.VIEW != null) {
+      operationNotAllowed("ALTER VIEW ... DROP PARTITION", ctx)
+    }
+    AlterTableDropPartitionStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      ctx.partitionSpec.asScala.map(visitNonOptionalPartitionSpec),
+      ifExists = ctx.EXISTS != null,
+      purge = ctx.PURGE != null,
+      retainData = false)
+  }
+
+  /**
+   * Create an [[AlterTableSerDePropertiesStatement]]
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE multi_part_name [PARTITION spec] SET SERDE serde_name
+   *     [WITH SERDEPROPERTIES props];
+   *   ALTER TABLE multi_part_name [PARTITION spec] SET SERDEPROPERTIES serde_properties;
+   * }}}
+   */
+  override def visitSetTableSerDe(ctx: SetTableSerDeContext): LogicalPlan = withOrigin(ctx) {
+    AlterTableSerDePropertiesStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      Option(ctx.STRING).map(string),
+      Option(ctx.tablePropertyList).map(visitPropertyKeyValues),
+      // TODO a partition spec is allowed to have optional values. This is currently violated.
+      Option(ctx.partitionSpec).map(visitNonOptionalPartitionSpec))
+  }
+
+  /**
+   * Alter the query of a view. This creates a [[AlterViewAsStatement]]
+   *
+   * For example:
+   * {{{
+   *   ALTER VIEW multi_part_name AS SELECT ...;
+   * }}}
+   */
+  override def visitAlterViewQuery(ctx: AlterViewQueryContext): LogicalPlan = withOrigin(ctx) {
+    AlterViewAsStatement(
+      visitMultipartIdentifier(ctx.multipartIdentifier),
+      originalText = source(ctx.query),
+      query = plan(ctx.query))
+  }
+
+  /**
+   * Create a [[RenameTableStatement]] command.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE multi_part_name1 RENAME TO multi_part_name2;
+   *   ALTER VIEW multi_part_name1 RENAME TO multi_part_name2;
+   * }}}
+   */
+  override def visitRenameTable(ctx: RenameTableContext): LogicalPlan = withOrigin(ctx) {
+    RenameTableStatement(
+      visitMultipartIdentifier(ctx.from),
+      visitMultipartIdentifier(ctx.to),
+      ctx.VIEW != null)
+  }
+
+  /**
+   * A command for users to list the properties for a table. If propertyKey is specified, the value
+   * for the propertyKey is returned. If propertyKey is not specified, all the keys and their
+   * corresponding values are returned.
+   * The syntax of using this command in SQL is:
+   * {{{
+   *   SHOW TBLPROPERTIES multi_part_name[('propertyKey')];
+   * }}}
+   */
+  override def visitShowTblProperties(
+      ctx: ShowTblPropertiesContext): LogicalPlan = withOrigin(ctx) {
+    ShowTablePropertiesStatement(
+      visitMultipartIdentifier(ctx.table),
+      Option(ctx.key).map(visitTablePropertyKey))
   }
 }
