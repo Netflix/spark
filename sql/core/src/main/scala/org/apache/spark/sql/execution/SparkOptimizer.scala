@@ -20,8 +20,11 @@ package org.apache.spark.sql.execution
 import org.apache.spark.sql.ExperimentalMethods
 import org.apache.spark.sql.catalyst.catalog.SessionCatalog
 import org.apache.spark.sql.catalyst.optimizer.Optimizer
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.datasources.PruneFileSourcePartitions
 import org.apache.spark.sql.execution.datasources.parquet.ParquetSchemaPruning
+import org.apache.spark.sql.execution.datasources.v2.V2ScanRelationPushDown
 import org.apache.spark.sql.execution.python.{ExtractPythonUDFFromAggregate, ExtractPythonUDFs}
 
 class SparkOptimizer(
@@ -29,17 +32,21 @@ class SparkOptimizer(
     experimentalMethods: ExperimentalMethods)
   extends Optimizer(catalog) {
 
+  override def earlyScanPushDownRules: Seq[Rule[LogicalPlan]] =
+  // TODO: move SchemaPruning into catalyst
+    ParquetSchemaPruning :: PruneFileSourcePartitions :: V2ScanRelationPushDown :: Nil
+
   override def defaultBatches: Seq[Batch] = (preOptimizationBatches ++ super.defaultBatches :+
     Batch("Optimize Metadata Only Query", Once, OptimizeMetadataOnlyQuery(catalog)) :+
     Batch("Extract Python UDFs", Once,
-      Seq(ExtractPythonUDFFromAggregate, ExtractPythonUDFs): _*) :+
-    Batch("Prune File Source Table Partitions", Once, PruneFileSourcePartitions) :+
-    Batch("Parquet Schema Pruning", Once, ParquetSchemaPruning)) ++
+      Seq(ExtractPythonUDFFromAggregate, ExtractPythonUDFs): _*)) ++
     postHocOptimizationBatches :+
     Batch("User Provided Optimizers", fixedPoint, experimentalMethods.extraOptimizations: _*)
 
   override def nonExcludableRules: Seq[String] =
-    super.nonExcludableRules :+ ExtractPythonUDFFromAggregate.ruleName
+    super.nonExcludableRules :+
+    ExtractPythonUDFFromAggregate.ruleName :+
+    V2ScanRelationPushDown.ruleName
 
   /**
    * Optimization batches that are executed before the regular optimization batches (also before

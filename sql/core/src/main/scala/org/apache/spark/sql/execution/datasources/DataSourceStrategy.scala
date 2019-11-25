@@ -20,6 +20,8 @@ package org.apache.spark.sql.execution.datasources
 import java.util.Locale
 import java.util.concurrent.Callable
 
+import scala.collection.mutable
+
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.Logging
@@ -431,11 +433,22 @@ case class DataSourceStrategy(conf: SQLConf) extends Strategy with Logging with 
 
 object DataSourceStrategy {
   /**
-   * Tries to translate a Catalyst [[Expression]] into data source [[Filter]].
-   *
-   * @return a `Some[Filter]` if the input [[Expression]] is convertible, otherwise a `None`.
+   * The attribute name of predicate could be different than the one in schema in case of
+   * case insensitive, we should change them to match the one in schema, so we do not need to
+   * worry about case sensitivity anymore.
    */
-  protected[sql] def translateFilter(predicate: Expression): Option[Filter] = {
+  protected[sql] def normalizeFilters(
+      filters: Seq[Expression],
+      attributes: Seq[AttributeReference]): Seq[Expression] = {
+    filters.map { e =>
+      e transform {
+        case a: AttributeReference =>
+          a.withName(attributes.find(_.semanticEquals(a)).getOrElse(a).name)
+      }
+    }
+  }
+
+  private def translateLeafNodeFilter(predicate: Expression): Option[Filter] = {
     predicate match {
       case expressions.EqualTo(a: Attribute, Literal(v, t)) =>
         Some(sources.EqualTo(a.name, convertToScala(v, t)))
@@ -483,7 +496,48 @@ object DataSourceStrategy {
         Some(sources.IsNull(a.name))
       case expressions.IsNotNull(a: Attribute) =>
         Some(sources.IsNotNull(a.name))
+      case expressions.StartsWith(a: Attribute, Literal(v: UTF8String, StringType)) =>
+        Some(sources.StringStartsWith(a.name, v.toString))
 
+      case expressions.EndsWith(a: Attribute, Literal(v: UTF8String, StringType)) =>
+        Some(sources.StringEndsWith(a.name, v.toString))
+
+      case expressions.Contains(a: Attribute, Literal(v: UTF8String, StringType)) =>
+        Some(sources.StringContains(a.name, v.toString))
+
+      case expressions.Literal(true, BooleanType) =>
+        Some(sources.AlwaysTrue)
+
+      case expressions.Literal(false, BooleanType) =>
+        Some(sources.AlwaysFalse)
+
+      case _ => None
+    }
+  }
+
+  /**
+   * Tries to translate a Catalyst [[Expression]] into data source [[Filter]].
+   *
+   * @return a `Some[Filter]` if the input [[Expression]] is convertible, otherwise a `None`.
+   */
+  protected[sql] def translateFilter(predicate: Expression): Option[Filter] = {
+    translateFilterWithMapping(predicate, None)
+  }
+
+  /**
+   * Tries to translate a Catalyst [[Expression]] into data source [[Filter]].
+   *
+   * @param predicate The input [[Expression]] to be translated as [[Filter]]
+   * @param translatedFilterToExpr An optional map from leaf node filter expressions to its
+   *                               translated [[Filter]]. The map is used for rebuilding
+   *                               [[Expression]] from [[Filter]].
+   * @return a `Some[Filter]` if the input [[Expression]] is convertible, otherwise a `None`.
+   */
+  protected[sql] def translateFilterWithMapping(
+      predicate: Expression,
+      translatedFilterToExpr: Option[mutable.HashMap[sources.Filter, Expression]])
+  : Option[Filter] = {
+    predicate match {
       case expressions.And(left, right) =>
         // See SPARK-12218 for detailed discussion
         // It is not safe to just convert one side if we do not understand the
@@ -495,29 +549,44 @@ object DataSourceStrategy {
         // Pushing one leg of AND down is only safe to do at the top level.
         // You can see ParquetFilters' createFilter for more details.
         for {
-          leftFilter <- translateFilter(left)
-          rightFilter <- translateFilter(right)
+          leftFilter <- translateFilterWithMapping(left, translatedFilterToExpr)
+          rightFilter <- translateFilterWithMapping(right, translatedFilterToExpr)
         } yield sources.And(leftFilter, rightFilter)
 
       case expressions.Or(left, right) =>
         for {
-          leftFilter <- translateFilter(left)
-          rightFilter <- translateFilter(right)
+          leftFilter <- translateFilterWithMapping(left, translatedFilterToExpr)
+          rightFilter <- translateFilterWithMapping(right, translatedFilterToExpr)
         } yield sources.Or(leftFilter, rightFilter)
 
       case expressions.Not(child) =>
-        translateFilter(child).map(sources.Not)
+        translateFilterWithMapping(child, translatedFilterToExpr).map(sources.Not)
 
-      case expressions.StartsWith(a: Attribute, Literal(v: UTF8String, StringType)) =>
-        Some(sources.StringStartsWith(a.name, v.toString))
+      case other =>
+        val filter = translateLeafNodeFilter(other)
+        if (filter.isDefined && translatedFilterToExpr.isDefined) {
+          translatedFilterToExpr.get(filter.get) = predicate
+        }
+        filter
+    }
+  }
 
-      case expressions.EndsWith(a: Attribute, Literal(v: UTF8String, StringType)) =>
-        Some(sources.StringEndsWith(a.name, v.toString))
-
-      case expressions.Contains(a: Attribute, Literal(v: UTF8String, StringType)) =>
-        Some(sources.StringContains(a.name, v.toString))
-
-      case _ => None
+  protected[sql] def rebuildExpressionFromFilter(
+      filter: Filter,
+      translatedFilterToExpr: mutable.HashMap[sources.Filter, Expression]): Expression = {
+    filter match {
+      case sources.And(left, right) =>
+        expressions.And(rebuildExpressionFromFilter(left, translatedFilterToExpr),
+          rebuildExpressionFromFilter(right, translatedFilterToExpr))
+      case sources.Or(left, right) =>
+        expressions.Or(rebuildExpressionFromFilter(left, translatedFilterToExpr),
+          rebuildExpressionFromFilter(right, translatedFilterToExpr))
+      case sources.Not(pred) =>
+        expressions.Not(rebuildExpressionFromFilter(pred, translatedFilterToExpr))
+      case other =>
+        translatedFilterToExpr.getOrElse(other,
+          throw new AnalysisException(
+            s"Fail to rebuild expression: missing key $filter in `translatedFilterToExpr`"))
     }
   }
 
