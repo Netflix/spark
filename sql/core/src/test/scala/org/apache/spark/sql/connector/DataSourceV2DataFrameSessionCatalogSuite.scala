@@ -32,7 +32,7 @@ import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-abstract class DataSourceV2DataFrameSessionCatalogSuite
+class DataSourceV2DataFrameSessionCatalogSuite
   extends InsertIntoTests(supportsDynamicOverwrite = true, includeSQLOnlyTests = false)
   with SessionCatalogTest[InMemoryTable, InMemoryTableSessionCatalog] {
 
