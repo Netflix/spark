@@ -199,7 +199,7 @@ class InsertSuite extends QueryTest with TestHiveSingleton with BeforeAndAfter
           """.stripMargin)
     }
     assert(e.getMessage.contains(
-      "Dynamic partitions do not support IF NOT EXISTS. Specified partitions with value: [c]"))
+      "Operation not allowed: IF NOT EXISTS with dynamic partitions: c"))
 
     // If the partition already exists, the insert will overwrite the data
     // unless users specify IF NOT EXISTS

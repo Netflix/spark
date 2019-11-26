@@ -1395,12 +1395,11 @@ class DataSourceV2SQLSuite
     withTable(t) {
       sql(s"CREATE TABLE $t (id bigint, data string, p int) USING foo PARTITIONED BY (id, p)")
       sql(s"INSERT INTO $t VALUES (2L, 'a', 2), (2L, 'b', 3), (3L, 'c', 3)")
-      val exc = intercept[AnalysisException] {
+      intercept[AnalysisException] {
         sql(s"DELETE FROM $t WHERE id IN (SELECT id FROM $t)")
       }
 
       assert(spark.table(t).count === 3)
-      assert(exc.getMessage.contains("Delete by condition with subquery is not supported"))
     }
   }
 
@@ -1416,122 +1415,6 @@ class DataSourceV2SQLSuite
       }
 
       assert(exc.getMessage.contains("DELETE is only supported with v2 tables"))
-    }
-  }
-
-  test("UPDATE TABLE") {
-    val t = "testcat.ns1.ns2.tbl"
-    withTable(t) {
-      sql(
-        s"""
-           |CREATE TABLE $t (id bigint, name string, age int, p int)
-           |USING foo
-           |PARTITIONED BY (id, p)
-         """.stripMargin)
-
-      // UPDATE non-existing table
-      assertAnalysisError(
-        "UPDATE dummy SET name='abc'",
-        "Table or view not found")
-
-      // UPDATE non-existing column
-      assertAnalysisError(
-        s"UPDATE $t SET dummy='abc'",
-        "cannot resolve")
-      assertAnalysisError(
-        s"UPDATE $t SET name='abc' WHERE dummy=1",
-        "cannot resolve")
-
-      // UPDATE is not implemented yet.
-      val e = intercept[UnsupportedOperationException] {
-        sql(s"UPDATE $t SET name='Robert', age=32 WHERE p=1")
-      }
-      assert(e.getMessage.contains("UPDATE TABLE is not supported temporarily"))
-    }
-  }
-
-  test("MERGE INTO TABLE") {
-    val target = "testcat.ns1.ns2.target"
-    val source = "testcat.ns1.ns2.source"
-    withTable(target, source) {
-      sql(
-        s"""
-           |CREATE TABLE $target (id bigint, name string, age int, p int)
-           |USING foo
-           |PARTITIONED BY (id, p)
-         """.stripMargin)
-      sql(
-        s"""
-           |CREATE TABLE $source (id bigint, name string, age int, p int)
-           |USING foo
-           |PARTITIONED BY (id, p)
-         """.stripMargin)
-
-      // MERGE INTO non-existing table
-      assertAnalysisError(
-        s"""
-           |MERGE INTO testcat.ns1.ns2.dummy AS target
-           |USING testcat.ns1.ns2.source AS source
-           |ON target.id = source.id
-           |WHEN MATCHED AND (target.age < 10) THEN DELETE
-           |WHEN MATCHED AND (target.age > 10) THEN UPDATE SET *
-           |WHEN NOT MATCHED AND (target.col2='insert')
-           |THEN INSERT *
-         """.stripMargin,
-        "Table or view not found")
-
-      // USING non-existing table
-      assertAnalysisError(
-        s"""
-           |MERGE INTO testcat.ns1.ns2.target AS target
-           |USING testcat.ns1.ns2.dummy AS source
-           |ON target.id = source.id
-           |WHEN MATCHED AND (target.age < 10) THEN DELETE
-           |WHEN MATCHED AND (target.age > 10) THEN UPDATE SET *
-           |WHEN NOT MATCHED AND (target.col2='insert')
-           |THEN INSERT *
-         """.stripMargin,
-        "Table or view not found")
-
-      // UPDATE non-existing column
-      assertAnalysisError(
-        s"""
-           |MERGE INTO testcat.ns1.ns2.target AS target
-           |USING testcat.ns1.ns2.source AS source
-           |ON target.id = source.id
-           |WHEN MATCHED AND (target.age < 10) THEN DELETE
-           |WHEN MATCHED AND (target.age > 10) THEN UPDATE SET target.dummy = source.age
-           |WHEN NOT MATCHED AND (target.col2='insert')
-           |THEN INSERT *
-         """.stripMargin,
-        "cannot resolve")
-
-      // UPDATE using non-existing column
-      assertAnalysisError(
-        s"""
-           |MERGE INTO testcat.ns1.ns2.target AS target
-           |USING testcat.ns1.ns2.source AS source
-           |ON target.id = source.id
-           |WHEN MATCHED AND (target.age < 10) THEN DELETE
-           |WHEN MATCHED AND (target.age > 10) THEN UPDATE SET target.age = source.dummy
-           |WHEN NOT MATCHED AND (target.col2='insert')
-           |THEN INSERT *
-         """.stripMargin,
-        "cannot resolve")
-
-      // MERGE INTO is not implemented yet.
-      val e = intercept[UnsupportedOperationException] {
-        sql(
-          s"""
-             |MERGE INTO testcat.ns1.ns2.target AS target
-             |USING testcat.ns1.ns2.source AS source
-             |ON target.id = source.id
-             |WHEN MATCHED AND (target.p < 0) THEN DELETE
-             |WHEN MATCHED AND (target.p > 0) THEN UPDATE SET *
-             |WHEN NOT MATCHED THEN INSERT *
-           """.stripMargin)
-      }
-      assert(e.getMessage.contains("MERGE INTO TABLE is not supported temporarily"))
     }
   }
 
@@ -1558,7 +1441,10 @@ class DataSourceV2SQLSuite
     withTable(t) {
       spark.sql(s"CREATE TABLE $t (id bigint, data string) USING foo")
       testV1Command("ANALYZE TABLE", s"$t COMPUTE STATISTICS")
-      testV1Command("ANALYZE TABLE", s"$t COMPUTE STATISTICS FOR ALL COLUMNS")
+      val exc = intercept[AnalysisException] {
+        spark.sql(s"ANALYZE TABLE $t COMPUTE STATISTICS FOR ALL COLUMNS")
+      }
+      assert(exc.getMessage.contains("ANALYZE TABLE ... ALL COLUMNS is not supported"))
     }
   }
 
@@ -1726,7 +1612,7 @@ class DataSourceV2SQLSuite
     val e = intercept[AnalysisException] {
       sql(s"ALTER VIEW $v AS SELECT 1")
     }
-    assert(e.message.contains("ALTER VIEW QUERY is only supported with v1 tables"))
+    assert(e.message.contains("ALTER VIEW does not support multi-part identifiers"))
   }
 
   test("SHOW TBLPROPERTIES: v2 table") {
