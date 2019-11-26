@@ -17,20 +17,151 @@
 
 package org.apache.spark.sql.execution.datasources.v2
 
-import org.apache.spark.sql.Strategy
-import org.apache.spark.sql.catalyst.expressions.PredicateHelper
-import org.apache.spark.sql.catalyst.plans.logical.{AlterNamespaceSetProperties, CreateNamespace, DescribeNamespace, DescribeTable, DropNamespace, LogicalPlan, SetCatalogAndNamespace, ShowCurrentNamespace, ShowNamespaces, ShowTableProperties, ShowTables}
-import org.apache.spark.sql.execution.SparkPlan
+import scala.collection.JavaConverters._
+
+import org.apache.spark.sql.{AnalysisException, Strategy}
+import org.apache.spark.sql.catalyst.expressions.{And, PredicateHelper, SubqueryExpression}
+import org.apache.spark.sql.catalyst.planning.PhysicalOperation
+import org.apache.spark.sql.catalyst.plans.logical.{AlterNamespaceSetProperties, AlterTable, AppendData, CreateNamespace, CreateTableAsSelect, CreateV2Table, DeleteFromTable, DescribeNamespace, DescribeTable, DropNamespace, DropTable, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, RefreshTable, RenameTable, ReplaceTable, ReplaceTableAsSelect, SetCatalogAndNamespace, ShowCurrentNamespace, ShowNamespaces, ShowTableProperties, ShowTables}
+import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, TableCapability}
+import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SparkPlan}
+import org.apache.spark.sql.execution.datasources.DataSourceStrategy
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 object DataSourceV2Strategy extends Strategy with PredicateHelper {
 
+  import DataSourceV2Implicits._
+
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
+    case PhysicalOperation(project, filters, relation: DataSourceV2ScanRelation) =>
+      // projection and filters were already pushed down in the optimizer.
+      // this uses PhysicalOperation to get the projection and ensure that if the batch scan does
+      // not support columnar, a projection is added to convert the rows to UnsafeRow.
+      val batchExec = BatchScanExec(relation.output, relation.scan)
+
+      val filterCondition = filters.reduceLeftOption(And)
+      val withFilter = filterCondition.map(FilterExec(_, batchExec)).getOrElse(batchExec)
+
+      val withProjection = if (withFilter.output != project || !batchExec.supportsColumnar) {
+        ProjectExec(project, withFilter)
+      } else {
+        withFilter
+      }
+
+      withProjection :: Nil
+
+    case WriteToDataSourceV2(writer, query) =>
+      WriteToDataSourceV2Exec(writer, planLater(query)) :: Nil
+
+    case CreateV2Table(catalog, ident, schema, parts, props, ifNotExists) =>
+      CreateTableExec(catalog, ident, schema, parts, props, ifNotExists) :: Nil
+
+    case CreateTableAsSelect(catalog, ident, parts, query, props, options, ifNotExists) =>
+      val writeOptions = new CaseInsensitiveStringMap(options.asJava)
+      catalog match {
+        case staging: StagingTableCatalog =>
+          AtomicCreateTableAsSelectExec(
+            staging, ident, parts, query, planLater(query), props, writeOptions, ifNotExists) :: Nil
+        case _ =>
+          CreateTableAsSelectExec(
+            catalog, ident, parts, query, planLater(query), props, writeOptions, ifNotExists) :: Nil
+      }
+
+    case RefreshTable(catalog, ident) =>
+      RefreshTableExec(catalog, ident) :: Nil
+
+    case ReplaceTable(catalog, ident, schema, parts, props, orCreate) =>
+      catalog match {
+        case staging: StagingTableCatalog =>
+          AtomicReplaceTableExec(staging, ident, schema, parts, props, orCreate = orCreate) :: Nil
+        case _ =>
+          ReplaceTableExec(catalog, ident, schema, parts, props, orCreate = orCreate) :: Nil
+      }
+
+    case ReplaceTableAsSelect(catalog, ident, parts, query, props, options, orCreate) =>
+      val writeOptions = new CaseInsensitiveStringMap(options.asJava)
+      catalog match {
+        case staging: StagingTableCatalog =>
+          AtomicReplaceTableAsSelectExec(
+            staging,
+            ident,
+            parts,
+            query,
+            planLater(query),
+            props,
+            writeOptions,
+            orCreate = orCreate) :: Nil
+        case _ =>
+          ReplaceTableAsSelectExec(
+            catalog,
+            ident,
+            parts,
+            query,
+            planLater(query),
+            props,
+            writeOptions,
+            orCreate = orCreate) :: Nil
+      }
+
+    case AppendData(r: DataSourceV2Relation, query, writeOptions, _) =>
+      r.table.asWritable match {
+        case v1 if v1.supports(TableCapability.V1_BATCH_WRITE) =>
+          AppendDataExecV1(v1, writeOptions.asOptions, query) :: Nil
+        case v2 =>
+          AppendDataExec(v2, writeOptions.asOptions, planLater(query)) :: Nil
+      }
+
+    case OverwriteByExpression(r: DataSourceV2Relation, deleteExpr, query, writeOptions, _) =>
+      // fail if any filter cannot be converted. correctness depends on removing all matching data.
+      val filters = splitConjunctivePredicates(deleteExpr).map {
+        filter => DataSourceStrategy.translateFilter(deleteExpr).getOrElse(
+          throw new AnalysisException(s"Cannot translate expression to source filter: $filter"))
+      }.toArray
+      r.table.asWritable match {
+        case v1 if v1.supports(TableCapability.V1_BATCH_WRITE) =>
+          OverwriteByExpressionExecV1(v1, filters, writeOptions.asOptions, query) :: Nil
+        case v2 =>
+          OverwriteByExpressionExec(v2, filters, writeOptions.asOptions, planLater(query)) :: Nil
+      }
+
+    case OverwritePartitionsDynamic(r: DataSourceV2Relation, query, writeOptions, _) =>
+      OverwritePartitionsDynamicExec(
+        r.table.asWritable, writeOptions.asOptions, planLater(query)) :: Nil
+
+    case DeleteFromTable(relation, condition) =>
+      relation match {
+        case DataSourceV2ScanRelation(table, _, output) =>
+          if (condition.exists(SubqueryExpression.hasSubquery)) {
+            throw new AnalysisException(
+              s"Delete by condition with subquery is not supported: $condition")
+          }
+          // fail if any filter cannot be converted.
+          // correctness depends on removing all matching data.
+          val filters = DataSourceStrategy.normalizeFilters(condition.toSeq, output)
+              .flatMap(splitConjunctivePredicates(_).map {
+                f => DataSourceStrategy.translateFilter(f).getOrElse(
+                  throw new AnalysisException(s"Exec update failed:" +
+                      s" cannot translate expression to source filter: $f"))
+              }).toArray
+          DeleteFromTableExec(table.asDeletable, filters) :: Nil
+        case _ =>
+          throw new AnalysisException("DELETE is only supported with v2 tables.")
+      }
 
     case desc @ DescribeNamespace(catalog, namespace, extended) =>
       DescribeNamespaceExec(desc.output, catalog, namespace, extended) :: Nil
 
     case desc @ DescribeTable(DataSourceV2Relation(table, _, _), isExtended) =>
       DescribeTableExec(desc.output, table, isExtended) :: Nil
+
+    case DropTable(catalog, ident, ifExists) =>
+      DropTableExec(catalog, ident, ifExists) :: Nil
+
+    case AlterTable(catalog, ident, _, changes) =>
+      AlterTableExec(catalog, ident, changes) :: Nil
+
+    case RenameTable(catalog, oldIdent, newIdent) =>
+      RenameTableExec(catalog, oldIdent, newIdent) :: Nil
 
     case AlterNamespaceSetProperties(catalog, namespace, properties) =>
       AlterNamespaceSetPropertiesExec(catalog, namespace, properties) :: Nil

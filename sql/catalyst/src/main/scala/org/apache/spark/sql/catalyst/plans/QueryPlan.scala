@@ -276,6 +276,31 @@ object QueryPlan extends PredicateHelper {
    * do not use `BindReferences` here as the plan may take the expression as a parameter with type
    * `Attribute`, and replace it with `BoundReference` will cause error.
    */
+  def normalizeExpressions[T <: Expression](e: T, input: AttributeSeq): T = {
+    e.transformUp {
+      case s: PlanExpression[QueryPlan[_] @unchecked] =>
+        // Normalize the outer references in the subquery plan.
+        val normalizedPlan = s.plan.transformAllExpressions {
+          case OuterReference(r) => OuterReference(QueryPlan.normalizeExpressions(r, input))
+        }
+        s.withNewPlan(normalizedPlan)
+
+      case ar: AttributeReference =>
+        val ordinal = input.indexOf(ar.exprId)
+        if (ordinal == -1) {
+          ar
+        } else {
+          ar.withExprId(ExprId(ordinal))
+        }
+    }.canonicalized.asInstanceOf[T]
+  }
+
+  /**
+   * Normalize the exprIds in the given expression, by updating the exprId in `AttributeReference`
+   * with its referenced ordinal from input attributes. It's similar to `BindReferences` but we
+   * do not use `BindReferences` here as the plan may take the expression as a parameter with type
+   * `Attribute`, and replace it with `BoundReference` will cause error.
+   */
   def normalizeExprId[T <: Expression](e: T, input: AttributeSeq): T = {
     e.transformUp {
       case s: SubqueryExpression => s.canonicalize(input)
