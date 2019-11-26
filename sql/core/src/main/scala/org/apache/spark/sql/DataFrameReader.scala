@@ -21,6 +21,7 @@ import java.util.{Locale, Properties}
 
 import scala.collection.JavaConverters._
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.univocity.parsers.csv.CsvParser
 
 import org.apache.spark.Partition
@@ -29,12 +30,16 @@ import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.json.{CreateJacksonParser, JacksonParser, JSONOptions}
+import org.apache.spark.sql.connector.catalog.SupportsRead
+import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.{DataSource, FailureSafeParser}
 import org.apache.spark.sql.execution.datasources.csv._
 import org.apache.spark.sql.execution.datasources.jdbc._
 import org.apache.spark.sql.execution.datasources.json.TextInputJsonDataSource
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{StringType, StructType}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.unsafe.types.UTF8String
 
 /**
@@ -187,7 +192,28 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
         "read files of Hive data source directly.")
     }
 
-    loadV1Source(paths: _*)
+    DataSource.lookupDataSourceV2(source, sparkSession.sessionState.conf).map { provider =>
+      val pathsOption = if (paths.isEmpty) {
+        None
+      } else {
+        val objectMapper = new ObjectMapper()
+        Some("paths" -> objectMapper.writeValueAsString(paths.toArray))
+      }
+
+      val finalOptions = extraOptions.toMap ++ pathsOption
+      val dsOptions = new CaseInsensitiveStringMap(finalOptions.asJava)
+      val table = userSpecifiedSchema match {
+        case Some(schema) => provider.getTable(dsOptions, schema)
+        case _ => provider.getTable(dsOptions)
+      }
+      import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Implicits._
+      table match {
+        case _: SupportsRead if table.supports(BATCH_READ) =>
+          Dataset.ofRows(sparkSession, DataSourceV2Relation.create(table, dsOptions))
+
+        case _ => loadV1Source(paths: _*)
+      }
+    }.getOrElse(loadV1Source(paths: _*))
   }
 
   private def loadV1Source(paths: String*) = {
