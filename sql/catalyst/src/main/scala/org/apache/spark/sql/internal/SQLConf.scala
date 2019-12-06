@@ -1552,6 +1552,14 @@ object SQLConf {
       .booleanConf
       .createWithDefault(false)
 
+  val LEGACY_CREATE_HIVE_TABLE_BY_DEFAULT_ENABLED =
+    buildConf("spark.sql.legacy.createHiveTableByDefault.enabled")
+        .internal()
+        .doc("When set to true, CREATE TABLE syntax without a provider will use hive " +
+            s"instead of the value of ${DEFAULT_DATA_SOURCE_NAME.key}.")
+        .booleanConf
+        .createWithDefault(false)
+
   val LEGACY_HAVING_WITHOUT_GROUP_BY_AS_WHERE =
     buildConf("spark.sql.legacy.parser.havingWithoutGroupByAsWhere")
       .internal()
@@ -1990,6 +1998,9 @@ class SQLConf extends Serializable with Logging {
     getConf(SQLConf.LEGACY_REPLACE_DATABRICKS_SPARK_AVRO_ENABLED)
 
   def setOpsPrecedenceEnforced: Boolean = getConf(SQLConf.LEGACY_SETOPS_PRECEDENCE_ENABLED)
+
+  def createHiveTableByDefaultEnabled: Boolean =
+    getConf(SQLConf.LEGACY_CREATE_HIVE_TABLE_BY_DEFAULT_ENABLED)
 
   /** ********************** SQLConf functionality methods ************ */
 

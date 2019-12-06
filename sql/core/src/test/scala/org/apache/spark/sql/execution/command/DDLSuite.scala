@@ -81,7 +81,7 @@ class InMemoryCatalogedDDLSuite extends DDLSuite with SharedSQLContext with Befo
     val tabName = "tbl"
     withTable(tabName) {
       val e = intercept[AnalysisException] {
-        sql(s"CREATE TABLE $tabName (i INT, j STRING)")
+        sql(s"CREATE TABLE $tabName (i INT, j STRING) STORED AS parquet")
       }.getMessage
       assert(e.contains("Hive support is required to CREATE Hive TABLE"))
     }
@@ -109,13 +109,13 @@ class InMemoryCatalogedDDLSuite extends DDLSuite with SharedSQLContext with Befo
     import testImplicits._
     withTable("t", "t1") {
       var e = intercept[AnalysisException] {
-        sql("CREATE TABLE t SELECT 1 as a, 1 as b")
+        sql("CREATE TABLE t STORED AS parquet SELECT 1 as a, 1 as b")
       }.getMessage
       assert(e.contains("Hive support is required to CREATE Hive TABLE (AS SELECT)"))
 
       spark.range(1).select('id as 'a, 'id as 'b).write.saveAsTable("t1")
       e = intercept[AnalysisException] {
-        sql("CREATE TABLE t SELECT a, b from t1")
+        sql("CREATE TABLE t STORED AS parquet SELECT a, b from t1")
       }.getMessage
       assert(e.contains("Hive support is required to CREATE Hive TABLE (AS SELECT)"))
     }

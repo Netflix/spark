@@ -92,6 +92,7 @@ abstract class AbstractSqlParser extends ParserInterface with Logging {
     lexer.removeErrorListeners()
     lexer.addErrorListener(ParseErrorListener)
     lexer.legacy_setops_precedence_enbled = SQLConf.get.setOpsPrecedenceEnforced
+    lexer.legacy_create_hive_table_by_default_enabled = SQLConf.get.createHiveTableByDefaultEnabled
 
     val tokenStream = new CommonTokenStream(lexer)
     val parser = new SqlBaseParser(tokenStream)
@@ -99,6 +100,7 @@ abstract class AbstractSqlParser extends ParserInterface with Logging {
     parser.removeErrorListeners()
     parser.addErrorListener(ParseErrorListener)
     parser.legacy_setops_precedence_enbled = SQLConf.get.setOpsPrecedenceEnforced
+    parser.legacy_create_hive_table_by_default_enabled = SQLConf.get.createHiveTableByDefaultEnabled
 
     try {
       try {
