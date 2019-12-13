@@ -254,4 +254,6 @@ private class BufferWriter extends DataWriter[InternalRow] {
   override def commit(): WriterCommitMessage = buffer
 
   override def abort(): Unit = {}
+
+  override def close(): Unit = {}
 }
