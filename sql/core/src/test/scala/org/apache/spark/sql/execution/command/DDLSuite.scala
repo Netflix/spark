@@ -167,6 +167,16 @@ class InMemoryCatalogedDDLSuite extends DDLSuite with SharedSQLContext with Befo
       assert(e.message.contains("It doesn't match the specified format"))
     }
   }
+
+  test("ALTER TABLE ALTER COLUMN with position is not supported") {
+    withTable("t") {
+      sql("CREATE TABLE t(i INT) USING parquet")
+      val e = intercept[AnalysisException] {
+        sql("ALTER TABLE t ALTER COLUMN i TYPE INT FIRST")
+      }
+      assert(e.message.contains("ALTER COLUMN ... FIRST | ALTER is only supported with v2 tables"))
+    }
+  }
 }
 
 abstract class DDLSuite extends QueryTest with SQLTestUtils {

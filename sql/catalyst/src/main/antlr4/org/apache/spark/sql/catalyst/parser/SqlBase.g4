@@ -726,7 +726,7 @@ intervalValue
     ;
 
 colPosition
-    : FIRST | AFTER multipartIdentifier
+    : position=FIRST | position=AFTER afterCol=multipartIdentifier
     ;
 
 dataType
