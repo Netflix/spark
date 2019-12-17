@@ -129,6 +129,7 @@ class PlanResolutionSuite extends AnalysisTest {
       }
     })
     when(manager.currentCatalog).thenReturn(testCat)
+    when(manager.currentNamespace).thenReturn(Array.empty[String])
     when(manager.v1SessionCatalog).thenReturn(v1SessionCatalog)
     manager
   }

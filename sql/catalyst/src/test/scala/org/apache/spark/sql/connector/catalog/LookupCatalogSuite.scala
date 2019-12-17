@@ -121,10 +121,11 @@ class LookupCatalogWithDefaultSuite extends SparkFunSuite with LookupCatalog wit
       }
     })
     when(manager.currentCatalog).thenReturn(catalogs("prod"))
+    when(manager.currentNamespace).thenReturn(Array.empty[String])
     manager
   }
 
-  test("catalog object identifier") {
+  test("catalog and identifier") {
     Seq(
       ("tbl", catalogs("prod"), Seq.empty, "tbl"),
       ("db.tbl", catalogs("prod"), Seq("db"), "tbl"),
