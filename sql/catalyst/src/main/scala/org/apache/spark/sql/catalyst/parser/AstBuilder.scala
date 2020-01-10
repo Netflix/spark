@@ -1888,10 +1888,10 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
     }
 
     StructField(
-      identifier.getText,
-      cleanedDataType,
-      nullable = true,
-      builder.build())
+      name = identifier.getText,
+      dataType = cleanedDataType,
+      nullable = NULL == null,
+      metadata = builder.build())
   }
 
   /**
@@ -1914,7 +1914,10 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
    */
   override def visitComplexColType(ctx: ComplexColTypeContext): StructField = withOrigin(ctx) {
     import ctx._
-    val structField = StructField(identifier.getText, typedVisit(dataType), nullable = true)
+    val structField = StructField(
+      name = identifier.getText,
+      dataType = typedVisit(dataType()),
+      nullable = NULL == null)
     if (STRING == null) structField else structField.withComment(string(STRING))
   }
 
@@ -2484,10 +2487,11 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
   override def visitQualifiedColTypeWithPosition(
       ctx: QualifiedColTypeWithPositionContext): QualifiedColType = withOrigin(ctx) {
     QualifiedColType(
-      typedVisit[Seq[String]](ctx.name),
-      typedVisit[DataType](ctx.dataType),
-      Option(ctx.comment).map(string),
-      Option(ctx.colPosition).map(typedVisit[ColumnPosition]))
+      name = typedVisit[Seq[String]](ctx.name),
+      dataType = typedVisit[DataType](ctx.dataType),
+      nullable = ctx.NULL == null,
+      comment = Option(ctx.comment).map(string),
+      position = Option(ctx.colPosition).map(typedVisit[ColumnPosition]))
   }
 
   /**
@@ -2543,9 +2547,35 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
     AlterTableAlterColumnStatement(
       visitMultipartIdentifier(ctx.table),
       typedVisit[Seq[String]](ctx.column),
-      Option(ctx.dataType).map(typedVisit[DataType]),
-      Option(ctx.comment).map(string),
-      Option(ctx.colPosition).map(typedVisit[ColumnPosition]))
+      dataType = Option(ctx.dataType).map(typedVisit[DataType]),
+      nullable = None,
+      comment = Option(ctx.comment).map(string),
+      position = Option(ctx.colPosition).map(typedVisit[ColumnPosition]))
+  }
+
+  /**
+   * Parse a [[AlterTableAlterColumnStatement]] command to change column nullability.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table1 ALTER COLUMN a.b.c SET NOT NULL
+   *   ALTER TABLE table1 ALTER COLUMN a.b.c DROP NOT NULL
+   * }}}
+   */
+  override def visitAlterColumnNullability(ctx: AlterColumnNullabilityContext): LogicalPlan = {
+    withOrigin(ctx) {
+      val nullable = ctx.setOrDrop.getType match {
+        case SqlBaseParser.SET => false
+        case SqlBaseParser.DROP => true
+      }
+      AlterTableAlterColumnStatement(
+        visitMultipartIdentifier(ctx.table),
+        typedVisit[Seq[String]](ctx.column),
+        dataType = None,
+        nullable = Some(nullable),
+        comment = None,
+        position = None)
+    }
   }
 
   /**
@@ -2567,13 +2597,18 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
       throw new AnalysisException("Renaming column is not supported in Hive-style ALTER COLUMN, " +
         "please run RENAME COLUMN instead.")
     }
+    if (ctx.colType.NULL != null) {
+      throw new AnalysisException("NOT NULL is not supported in Hive-style ALTER COLUMN, " +
+        "please run ALTER COLUMN ... SET/DROP NOT NULL instead.")
+    }
 
     AlterTableAlterColumnStatement(
       typedVisit[Seq[String]](ctx.table),
       columnNameParts,
-      Option(ctx.colType().dataType()).map(typedVisit[DataType]),
-      Option(ctx.colType().STRING()).map(string),
-      Option(ctx.colPosition).map(typedVisit[ColumnPosition]))
+      dataType = Option(ctx.colType().dataType()).map(typedVisit[DataType]),
+      nullable = None,
+      comment = Option(ctx.colType().STRING()).map(string),
+      position = Option(ctx.colPosition).map(typedVisit[ColumnPosition]))
   }
 
   /**

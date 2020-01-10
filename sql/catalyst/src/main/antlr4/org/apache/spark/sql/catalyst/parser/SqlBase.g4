@@ -143,6 +143,9 @@ statement
     | ALTER TABLE table=multipartIdentifier
         (ALTER | CHANGE) COLUMN? column=multipartIdentifier
         (TYPE dataType)? (COMMENT comment=STRING)? colPosition?        #alterTableColumn
+    | ALTER TABLE table=multipartIdentifier
+        ALTER COLUMN? column=multipartIdentifier
+        setOrDrop=(SET | DROP) NOT NULL                                #alterColumnNullability
     | ALTER TABLE table=multipartIdentifier partitionSpec?
         CHANGE COLUMN?
         colName=multipartIdentifier colType colPosition?               #hiveChangeColumn
@@ -747,7 +750,7 @@ qualifiedColTypeWithPositionList
     ;
 
 qualifiedColTypeWithPosition
-    : name=multipartIdentifier dataType (COMMENT comment=STRING)? colPosition?
+    : name=multipartIdentifier dataType (NOT NULL)? (COMMENT comment=STRING)? colPosition?
     ;
 
 colTypeList
@@ -755,7 +758,7 @@ colTypeList
     ;
 
 colType
-    : identifier dataType (COMMENT STRING)?
+    : identifier dataType (NOT NULL)? (COMMENT STRING)?
     ;
 
 complexColTypeList
@@ -763,7 +766,7 @@ complexColTypeList
     ;
 
 complexColType
-    : identifier ':' dataType (COMMENT STRING)?
+    : identifier ':' dataType (NOT NULL)? (COMMENT STRING)?
     ;
 
 whenClause

@@ -130,6 +130,7 @@ case class ReplaceTableAsSelectStatement(
 case class QualifiedColType(
     name: Seq[String],
     dataType: DataType,
+    nullable: Boolean,
     comment: Option[String],
     position: Option[ColumnPosition])
 
@@ -147,6 +148,7 @@ case class AlterTableAlterColumnStatement(
     tableName: Seq[String],
     column: Seq[String],
     dataType: Option[DataType],
+    nullable: Option[Boolean],
     comment: Option[String],
     position: Option[ColumnPosition]) extends ParsedStatement
 
