@@ -126,7 +126,7 @@ class ShowCreateTableSuite extends QueryTest with SQLTestUtils with TestHiveSing
         s"""CREATE TABLE t1 (
            |  c1 INT COMMENT 'bla',
            |  c2 STRING
-           |)
+           |) STORED AS PARQUET
            |TBLPROPERTIES (
            |  'prop1' = 'value1',
            |  'prop2' = 'value2'
@@ -145,7 +145,7 @@ class ShowCreateTableSuite extends QueryTest with SQLTestUtils with TestHiveSing
           s"""CREATE TABLE t1 (
              |  c1 INT COMMENT 'bla',
              |  c2 STRING
-             |)
+             |) STORED AS PARQUET
              |LOCATION '${dir.toURI}'
              |TBLPROPERTIES (
              |  'prop1' = 'value1',
@@ -290,7 +290,7 @@ class ShowCreateTableSuite extends QueryTest with SQLTestUtils with TestHiveSing
 
   test("SPARK-24911: keep quotes for nested fields") {
     withTable("t1") {
-      val createTable = "CREATE TABLE `t1`(`a` STRUCT<`b`: STRING>)"
+      val createTable = "CREATE TABLE `t1` (`a` STRUCT<`b`: STRING>)"
       sql(createTable)
       val shownDDL = sql(s"SHOW CREATE TABLE t1")
         .head()
